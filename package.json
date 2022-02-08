@@ -3,14 +3,44 @@
   "version": "0.0.1",
   "description": "Easy and friendly API to connect and interact between content window and its containing iframe",
   "main": "./dist/index.js",
-  "repository": "https://github.com/fabrice8/iframe.io",
-  "author": "Fabrice K.M.E",
-  "license": "MIT",
+  "type": "commonjs",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    "require": "./dist/index.js"
+  },
   "private": false,
+  "scripts": {
+    "compile": "rimraf ./dist && tsc",
+    "test": "yarn run compile && yarn run test:types && yarn run test:unit",
+    "test:types": "tsd",
+    "test:unit": "nyc mocha --require ts-node/register --reporter spec --slow 200 --bail --timeout 10000 test/iframe.io.ts",
+    "prepack": "yarn run compile"
+  },
   "devDependencies": {
+    "@types/mocha": "^9.1.0",
+    "expect.js": "^0.3.1",
+    "mocha": "^9.2.0",
+    "rimraf": "^3.0.2",
     "typescript": "^4.5.5"
   },
-  "scripts": {
-    "build": "tsc"
-  }
+  "files": [
+    "dist/"
+  ],
+  "directories": {
+    "example": "example/",
+    "test": "test/"
+  },
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git://github.com/fabrice8/iframe.io"
+  },
+  "keywords": [
+    "realtime",
+    "iframe",
+    "browser",
+    "events",
+    "io"
+  ],
+  "author": "Fabrice K.M.E"
 }
