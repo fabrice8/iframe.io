@@ -3,11 +3,13 @@
   "version": "0.0.4",
   "description": "Easy and friendly API to connect and interact between content window and its containing iframe",
   "main": "./dist/index.js",
-  "type": "commonjs",
   "types": "./src/index.d.ts",
   "exports": {
-    "import": "./wrapper.mjs",
-    "require": "./dist/index.js"
+    ".": {
+      "import": "./dist/index.js",
+      "require": "./dist/index.js",
+      "types": "./src/index.d.ts"
+    }
   },
   "private": false,
   "scripts": {
