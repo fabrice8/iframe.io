@@ -1,5 +1,5 @@
 
-import type { Options, RegisteredEvents, Peer, Message, MessageData, Listener } from './@types'
+import type { Options, RegisteredEvents, Peer, Message, MessageData, Listener } from '..'
 
 export default class IFrameIO {
 
