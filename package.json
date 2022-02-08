@@ -1,0 +1,16 @@
+{
+  "name": "iframe.io",
+  "version": "0.0.1",
+  "description": "Easy and friendly API to connect and interact between content window and its containing iframe",
+  "main": "./dist/index.js",
+  "repository": "https://github.com/fabrice8/iframe.io",
+  "author": "Fabrice K.M.E",
+  "license": "MIT",
+  "private": false,
+  "devDependencies": {
+    "typescript": "^4.5.5"
+  },
+  "scripts": {
+    "build": "tsc"
+  }
+}
