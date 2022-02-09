@@ -1,6 +1,10 @@
 
 import type { Options, RegisteredEvents, Peer, Message, MessageData, Listener } from '..'
 
+function newObject( data: object ){
+  return JSON.parse( JSON.stringify( data ) )
+}
+
 export default class IFrameIO {
 
   Events: RegisteredEvents
@@ -39,24 +43,24 @@ export default class IFrameIO {
           || typeof data !== 'object'
           || !data.hasOwnProperty('_event') ) return
           
-      const { _event, payload } = data as Message['data']
+      const { _event, payload, callback } = data as Message['data']
       this.debug( `[${this.peer.type}] Message: ${_event}`, payload || '' )
 
       // Handshake or availability check events
-      if( _event == 'pong' ) return
-      
-      // Volatile event
-			if( !this.Events[ _event ] )
-        return this.debug(`[${this.peer.type}] No <${_event}> listener defined`)
+      if( _event == 'pong' ){
+        // Content Window is connected to iframe
+        this.trigger('connect')
+        return this.debug(`[${this.peer.type}] connected`)
+      }
 
-      // Trigger listeners
-			this.Events[ _event ].map( fn => fn( payload ) )
-      // Delete once event listeners
-      delete this.Events[ _event +'--@once']
+      // Trigger available event listeners
+      this.trigger( _event, payload, callback )
     }, false )
 
     this.debug(`[${this.peer.type}] Initiate connection: IFrame origin <${iframeOrigin}>`)
     this.emit('ping')
+
+    return this
   }
 
   listen( hostOrigin?: string ){
@@ -85,21 +89,47 @@ export default class IFrameIO {
       else if( origin !== this.peer.origin )
         throw new Error('Invalid Origin')
       
-      const { _event, payload } = data
+      const { _event, payload, callback } = data
       this.debug( `[${this.peer.type}] Message: ${_event}`, payload || '' )
 
       // Handshake or availability check events
-      if( _event == 'ping' ) return this.emit('pong')
-      
-      // Volatile event
-			if( !this.Events[ _event ] )
-        return this.debug(`[${this.peer.type}] No <${_event}> listener defined`)
+      if( _event == 'ping' ){
+        this.emit('pong')
 
-      // Trigger listeners
-			this.Events[ _event ].map( fn => fn( payload ) )
-      // Delete once event listeners
-      delete this.Events[ _event +'--@once']
+        // Iframe is connected to content window
+        this.trigger('connect')
+        return this.debug(`[${this.peer.type}] connected`)
+      }
+
+      // Trigger available event listeners
+      this.trigger( _event, payload, callback )
     }, false )
+
+    return this
+  }
+
+  trigger( _event: string, payload?: MessageData['payload'], callback?: boolean ){
+    // Volatile event
+    if( !this.Events[ _event ] 
+        && !this.Events[ _event +'--@once'] )
+      return this.debug(`[${this.peer.type}] No <${_event}> listener defined`)
+
+    const callbackFn = callback ? 
+                ( error?: boolean | string, response?: any ): void => {
+                  this.emit( _event +'--@callback', { error, response } )
+                  return
+                } : undefined
+
+    // Trigger listeners
+    if( this.Events[ _event +'--@once'] ){
+      // Once triggable event
+      _event += '--@once'
+      
+      this.Events[ _event ].map( fn => fn( payload, callbackFn ) )
+      // Delete once event listeners after triggered
+      delete this.Events[ _event ]
+    }
+    else this.Events[ _event ].map( fn => fn( payload, callbackFn ) )
   }
 
   emit( _event: string, payload?: MessageData['payload'], fn?: Listener ){
@@ -111,11 +141,15 @@ export default class IFrameIO {
 			fn = payload
 			payload = null
 		}
-    
-    this.peer.source.postMessage( JSON.parse( JSON.stringify({ _event, payload }) ), this.peer.origin as string )
 
     // Acknowledge/callback event listener
-		if( typeof fn == 'function' ) this.once( _event, fn )
+    let hasCallback = false
+    if( typeof fn == 'function' ){
+		  this.once( _event +'--@callback', fn )
+      hasCallback = true
+    }
+    
+    this.peer.source.postMessage( newObject({ _event, payload, callback: hasCallback }), this.peer.origin as string )
 
 		return this
   }
