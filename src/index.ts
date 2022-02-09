@@ -1,5 +1,14 @@
 
-import type { Options, RegisteredEvents, Peer, Message, MessageData, Listener, PeerType } from '..'
+import type { 
+  Options, 
+  RegisteredEvents, 
+  Peer, 
+  PeerType,
+  Message, 
+  MessageData, 
+  Listener, 
+  CallbackFunction
+} from '..'
 
 function newObject( data: object ){
   return JSON.parse( JSON.stringify( data ) )
@@ -116,21 +125,23 @@ export default class IFrameIO {
       return this.debug(`[${this.peer.type}] No <${_event}> listener defined`)
 
     const callbackFn = callback ? 
-                ( error?: boolean | string, response?: any ): void => {
-                  this.emit( _event +'--@callback', { error, response } )
-                  return
-                } : undefined
+                  ( error: boolean | string, ...args: any[] ): void => {
+                    this.emit( _event +'--@callback', { error: error || false, ...args } )
+                    return
+                  } : undefined
+    let listeners: Listener[] = []
 
-    // Trigger listeners
     if( this.Events[ _event +'--@once'] ){
       // Once triggable event
       _event += '--@once'
-      
-      this.Events[ _event ].map( fn => fn( payload, callbackFn ) )
+      listeners = this.Events[ _event ]
       // Delete once event listeners after triggered
       delete this.Events[ _event ]
     }
-    else this.Events[ _event ].map( fn => fn( payload, callbackFn ) )
+    else listeners = this.Events[ _event ]
+    
+    // Trigger listeners
+    listeners.map( fn => payload ? fn( payload, callbackFn ) : fn( callbackFn ) )
   }
 
   emit( _event: string, payload?: MessageData['payload'], fn?: Listener ){
@@ -145,8 +156,10 @@ export default class IFrameIO {
 
     // Acknowledge/callback event listener
     let hasCallback = false
-    if( typeof fn == 'function' ){
-		  this.once( _event +'--@callback', fn )
+    if( typeof fn === 'function' ){
+      const callbackFunction = fn as CallbackFunction
+
+		  this.once( _event +'--@callback', ({ error, ...args }) => callbackFunction( error, ...args ) )
       hasCallback = true
     }
     

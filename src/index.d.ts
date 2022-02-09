@@ -1,7 +1,9 @@
 
 
-type PeerType = 'WINDOW' | 'IFRAME'
-export type Listener = ( payload?: any, callback?: ( error?: boolean | string, response?: any ) => void ) => void
+export type PeerType = 'WINDOW' | 'IFRAME'
+
+export type CallbackFunction = ( error: boolean | string, ...args: any[] ) => void
+export type Listener = ( payload?: any, callback?: CallbackFunction ) => void
 
 export type Options = {
   type?: PeerType

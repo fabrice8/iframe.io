@@ -10,6 +10,26 @@ var __assign = (this && this.__assign) || function () {
     };
     return __assign.apply(this, arguments);
 };
+var __rest = (this && this.__rest) || function (s, e) {
+    var t = {};
+    for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
+        t[p] = s[p];
+    if (s != null && typeof Object.getOwnPropertySymbols === "function")
+        for (var i = 0, p = Object.getOwnPropertySymbols(s); i < p.length; i++) {
+            if (e.indexOf(p[i]) < 0 && Object.prototype.propertyIsEnumerable.call(s, p[i]))
+                t[p[i]] = s[p[i]];
+        }
+    return t;
+};
+var __spreadArray = (this && this.__spreadArray) || function (to, from, pack) {
+    if (pack || arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
+        if (ar || !(i in from)) {
+            if (!ar) ar = Array.prototype.slice.call(from, 0, i);
+            ar[i] = from[i];
+        }
+    }
+    return to.concat(ar || Array.prototype.slice.call(from));
+};
 Object.defineProperty(exports, "__esModule", { value: true });
 function newObject(data) {
     return JSON.parse(JSON.stringify(data));
@@ -107,20 +127,26 @@ var IFrameIO = /** @class */ (function () {
             && !this.Events[_event + '--@once'])
             return this.debug("[".concat(this.peer.type, "] No <").concat(_event, "> listener defined"));
         var callbackFn = callback ?
-            function (error, response) {
-                _this.emit(_event + '--@callback', { error: error, response: response });
+            function (error) {
+                var args = [];
+                for (var _i = 1; _i < arguments.length; _i++) {
+                    args[_i - 1] = arguments[_i];
+                }
+                _this.emit(_event + '--@callback', __assign({ error: error || false }, args));
                 return;
             } : undefined;
-        // Trigger listeners
+        var listeners = [];
         if (this.Events[_event + '--@once']) {
             // Once triggable event
             _event += '--@once';
-            this.Events[_event].map(function (fn) { return fn(payload, callbackFn); });
+            listeners = this.Events[_event];
             // Delete once event listeners after triggered
             delete this.Events[_event];
         }
         else
-            this.Events[_event].map(function (fn) { return fn(payload, callbackFn); });
+            listeners = this.Events[_event];
+        // Trigger listeners
+        listeners.map(function (fn) { return payload ? fn(payload, callbackFn) : fn(callbackFn); });
     };
     IFrameIO.prototype.emit = function (_event, payload, fn) {
         if (!this.peer.source)
@@ -131,8 +157,12 @@ var IFrameIO = /** @class */ (function () {
         }
         // Acknowledge/callback event listener
         var hasCallback = false;
-        if (typeof fn == 'function') {
-            this.once(_event + '--@callback', fn);
+        if (typeof fn === 'function') {
+            var callbackFunction_1 = fn;
+            this.once(_event + '--@callback', function (_a) {
+                var error = _a.error, args = __rest(_a, ["error"]);
+                return callbackFunction_1.apply(void 0, __spreadArray([error], args, false));
+            });
             hasCallback = true;
         }
         this.peer.source.postMessage(newObject({ _event: _event, payload: payload, callback: hasCallback }), this.peer.origin);
