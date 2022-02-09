@@ -10,17 +10,6 @@ var __assign = (this && this.__assign) || function () {
     };
     return __assign.apply(this, arguments);
 };
-var __rest = (this && this.__rest) || function (s, e) {
-    var t = {};
-    for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p) && e.indexOf(p) < 0)
-        t[p] = s[p];
-    if (s != null && typeof Object.getOwnPropertySymbols === "function")
-        for (var i = 0, p = Object.getOwnPropertySymbols(s); i < p.length; i++) {
-            if (e.indexOf(p[i]) < 0 && Object.prototype.propertyIsEnumerable.call(s, p[i]))
-                t[p[i]] = s[p[i]];
-        }
-    return t;
-};
 var __spreadArray = (this && this.__spreadArray) || function (to, from, pack) {
     if (pack || arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
         if (ar || !(i in from)) {
@@ -132,7 +121,7 @@ var IFrameIO = /** @class */ (function () {
                 for (var _i = 1; _i < arguments.length; _i++) {
                     args[_i - 1] = arguments[_i];
                 }
-                _this.emit(_event + '--@callback', __assign({ error: error || false }, args));
+                _this.emit(_event + '--@callback', { error: error || false, args: args });
                 return;
             } : undefined;
         var listeners = [];
@@ -160,7 +149,7 @@ var IFrameIO = /** @class */ (function () {
         if (typeof fn === 'function') {
             var callbackFunction_1 = fn;
             this.once(_event + '--@callback', function (_a) {
-                var error = _a.error, args = __rest(_a, ["error"]);
+                var error = _a.error, args = _a.args;
                 return callbackFunction_1.apply(void 0, __spreadArray([error], args, false));
             });
             hasCallback = true;

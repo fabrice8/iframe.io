@@ -126,7 +126,7 @@ export default class IFrameIO {
 
     const callbackFn = callback ? 
                   ( error: boolean | string, ...args: any[] ): void => {
-                    this.emit( _event +'--@callback', { error: error || false, ...args } )
+                    this.emit( _event +'--@callback', { error: error || false, args } )
                     return
                   } : undefined
     let listeners: Listener[] = []
@@ -159,7 +159,7 @@ export default class IFrameIO {
     if( typeof fn === 'function' ){
       const callbackFunction = fn as CallbackFunction
 
-		  this.once( _event +'--@callback', ({ error, ...args }) => callbackFunction( error, ...args ) )
+		  this.once( _event +'--@callback', ({ error, args }) => callbackFunction( error, ...args ) )
       hasCallback = true
     }
     
