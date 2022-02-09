@@ -1,5 +1,5 @@
 
-import type { Options, RegisteredEvents, Peer, Message, MessageData, Listener } from '..'
+import type { Options, RegisteredEvents, Peer, Message, MessageData, Listener, PeerType } from '..'
 
 function newObject( data: object ){
   return JSON.parse( JSON.stringify( data ) )
@@ -20,7 +20,8 @@ export default class IFrameIO {
 	  this.Events = {}
     this.peer = { type: 'IFRAME' }
 
-    if( options.type ) this.peer.type = options.type
+    if( options.type ) 
+      this.peer.type = options.type.toUpperCase() as PeerType
   }
 
   debug( ...args: any[] ){ this.options && this.options.debug && console.log( ...args ) }

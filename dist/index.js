@@ -11,6 +11,9 @@ var __assign = (this && this.__assign) || function () {
     return __assign.apply(this, arguments);
 };
 Object.defineProperty(exports, "__esModule", { value: true });
+function newObject(data) {
+    return JSON.parse(JSON.stringify(data));
+}
 var IFrameIO = /** @class */ (function () {
     function IFrameIO(options) {
         if (options && typeof options !== 'object')
@@ -19,7 +22,7 @@ var IFrameIO = /** @class */ (function () {
         this.Events = {};
         this.peer = { type: 'IFRAME' };
         if (options.type)
-            this.peer.type = options.type;
+            this.peer.type = options.type.toUpperCase();
     }
     IFrameIO.prototype.debug = function () {
         var args = [];
@@ -45,21 +48,20 @@ var IFrameIO = /** @class */ (function () {
                 || typeof data !== 'object'
                 || !data.hasOwnProperty('_event'))
                 return;
-            var _b = data, _event = _b._event, payload = _b.payload;
+            var _b = data, _event = _b._event, payload = _b.payload, callback = _b.callback;
             _this.debug("[".concat(_this.peer.type, "] Message: ").concat(_event), payload || '');
             // Handshake or availability check events
-            if (_event == 'pong')
-                return;
-            // Volatile event
-            if (!_this.Events[_event])
-                return _this.debug("[".concat(_this.peer.type, "] No <").concat(_event, "> listener defined"));
-            // Trigger listeners
-            _this.Events[_event].map(function (fn) { return fn(payload); });
-            // Delete once event listeners
-            delete _this.Events[_event + '--@once'];
+            if (_event == 'pong') {
+                // Content Window is connected to iframe
+                _this.trigger('connect');
+                return _this.debug("[".concat(_this.peer.type, "] connected"));
+            }
+            // Trigger available event listeners
+            _this.trigger(_event, payload, callback);
         }, false);
         this.debug("[".concat(this.peer.type, "] Initiate connection: IFrame origin <").concat(iframeOrigin, ">"));
         this.emit('ping');
+        return this;
     };
     IFrameIO.prototype.listen = function (hostOrigin) {
         // Listening to connection from the content window
@@ -84,19 +86,41 @@ var IFrameIO = /** @class */ (function () {
             // Origin different from handshaked source origin
             else if (origin !== _this.peer.origin)
                 throw new Error('Invalid Origin');
-            var _event = data._event, payload = data.payload;
+            var _event = data._event, payload = data.payload, callback = data.callback;
             _this.debug("[".concat(_this.peer.type, "] Message: ").concat(_event), payload || '');
             // Handshake or availability check events
-            if (_event == 'ping')
-                return _this.emit('pong');
-            // Volatile event
-            if (!_this.Events[_event])
-                return _this.debug("[".concat(_this.peer.type, "] No <").concat(_event, "> listener defined"));
-            // Trigger listeners
-            _this.Events[_event].map(function (fn) { return fn(payload); });
-            // Delete once event listeners
-            delete _this.Events[_event + '--@once'];
+            if (_event == 'ping') {
+                _this.emit('pong');
+                // Iframe is connected to content window
+                _this.trigger('connect');
+                return _this.debug("[".concat(_this.peer.type, "] connected"));
+            }
+            // Trigger available event listeners
+            _this.trigger(_event, payload, callback);
         }, false);
+        return this;
+    };
+    IFrameIO.prototype.trigger = function (_event, payload, callback) {
+        var _this = this;
+        // Volatile event
+        if (!this.Events[_event]
+            && !this.Events[_event + '--@once'])
+            return this.debug("[".concat(this.peer.type, "] No <").concat(_event, "> listener defined"));
+        var callbackFn = callback ?
+            function (error, response) {
+                _this.emit(_event + '--@callback', { error: error, response: response });
+                return;
+            } : undefined;
+        // Trigger listeners
+        if (this.Events[_event + '--@once']) {
+            // Once triggable event
+            _event += '--@once';
+            this.Events[_event].map(function (fn) { return fn(payload, callbackFn); });
+            // Delete once event listeners after triggered
+            delete this.Events[_event];
+        }
+        else
+            this.Events[_event].map(function (fn) { return fn(payload, callbackFn); });
     };
     IFrameIO.prototype.emit = function (_event, payload, fn) {
         if (!this.peer.source)
@@ -105,10 +129,13 @@ var IFrameIO = /** @class */ (function () {
             fn = payload;
             payload = null;
         }
-        this.peer.source.postMessage(JSON.parse(JSON.stringify({ _event: _event, payload: payload })), this.peer.origin);
         // Acknowledge/callback event listener
-        if (typeof fn == 'function')
-            this.once(_event, fn);
+        var hasCallback = false;
+        if (typeof fn == 'function') {
+            this.once(_event + '--@callback', fn);
+            hasCallback = true;
+        }
+        this.peer.source.postMessage(newObject({ _event: _event, payload: payload, callback: hasCallback }), this.peer.origin);
         return this;
     };
     IFrameIO.prototype.on = function (_event, fn) {
