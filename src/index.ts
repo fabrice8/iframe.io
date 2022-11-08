@@ -59,12 +59,12 @@ export default class IFrameIO {
       // Handshake or availability check events
       if( _event == 'pong' ){
         // Content Window is connected to iframe
-        this.trigger('connect')
+        this.fire('connect')
         return this.debug(`[${this.peer.type}] connected`)
       }
 
-      // Trigger available event listeners
-      this.trigger( _event, payload, callback )
+      // Fire available event listeners
+      this.fire( _event, payload, callback )
     }, false )
 
     this.debug(`[${this.peer.type}] Initiate connection: IFrame origin <${iframeOrigin}>`)
@@ -107,18 +107,18 @@ export default class IFrameIO {
         this.emit('pong')
 
         // Iframe is connected to content window
-        this.trigger('connect')
+        this.fire('connect')
         return this.debug(`[${this.peer.type}] connected`)
       }
 
-      // Trigger available event listeners
-      this.trigger( _event, payload, callback )
+      // Fire available event listeners
+      this.fire( _event, payload, callback )
     }, false )
 
     return this
   }
 
-  trigger( _event: string, payload?: MessageData['payload'], callback?: boolean ){
+  fire( _event: string, payload?: MessageData['payload'], callback?: boolean ){
     // Volatile event
     if( !this.Events[ _event ] 
         && !this.Events[ _event +'--@once'] )
@@ -135,12 +135,12 @@ export default class IFrameIO {
       // Once triggable event
       _event += '--@once'
       listeners = this.Events[ _event ]
-      // Delete once event listeners after triggered
+      // Delete once event listeners after fired
       delete this.Events[ _event ]
     }
     else listeners = this.Events[ _event ]
     
-    // Trigger listeners
+    // Fire listeners
     listeners.map( fn => payload ? fn( payload, callbackFn ) : fn( callbackFn ) )
   }
 
