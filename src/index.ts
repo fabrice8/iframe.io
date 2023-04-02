@@ -1,20 +1,41 @@
 
-import type {
-  Options, 
-  RegisteredEvents, 
-  Peer, 
-  PeerType,
-  Message, 
-  MessageData, 
-  Listener,
-  CallbackFunction
-} from './types'
+export type PeerType = 'WINDOW' | 'IFRAME'
+
+export type CallbackFunction = ( error: boolean | string, ...args: any[] ) => void
+export type Listener = ( payload?: any, callback?: CallbackFunction ) => void
+
+export type Options = {
+  type?: PeerType
+  debug?: boolean
+}
+
+export interface RegisteredEvents {
+  [index: string]: Listener[]
+}
+
+export type Peer = {
+  type: PeerType
+  source?: Window
+  origin?: string
+}
+
+export type MessageData = {
+  _event: string
+  payload: any
+  callback: boolean
+}
+
+export type Message = {
+  origin: string
+  data: MessageData,
+  source: Window
+}
 
 function newObject( data: object ){
   return JSON.parse( JSON.stringify( data ) )
 }
 
-export default class IFrameIO {
+export default class IOF {
 
   Events: RegisteredEvents
   peer: Peer

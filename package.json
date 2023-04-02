@@ -3,7 +3,7 @@
   "version": "0.0.9",
   "description": "Easy and friendly API to connect and interact between content window and its containing iframe",
   "main": "./dist/index.js",
-  "types": "./src/types/*.d.ts",
+  "types": "./dist/index.d.ts",
   "private": false,
   "scripts": {
     "compile": "rimraf ./dist && tsc",

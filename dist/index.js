@@ -23,8 +23,8 @@ Object.defineProperty(exports, "__esModule", { value: true });
 function newObject(data) {
     return JSON.parse(JSON.stringify(data));
 }
-var IFrameIO = /** @class */ (function () {
-    function IFrameIO(options) {
+var IOF = /** @class */ (function () {
+    function IOF(options) {
         if (options && typeof options !== 'object')
             throw new Error('Invalid Options');
         this.options = options;
@@ -33,14 +33,14 @@ var IFrameIO = /** @class */ (function () {
         if (options.type)
             this.peer.type = options.type.toUpperCase();
     }
-    IFrameIO.prototype.debug = function () {
+    IOF.prototype.debug = function () {
         var args = [];
         for (var _i = 0; _i < arguments.length; _i++) {
             args[_i] = arguments[_i];
         }
         this.options && this.options.debug && console.log.apply(console, args);
     };
-    IFrameIO.prototype.initiate = function (contentWindow, iframeOrigin) {
+    IOF.prototype.initiate = function (contentWindow, iframeOrigin) {
         var _this = this;
         // Establish a connection with an iframe containing in the current window
         if (!contentWindow || !iframeOrigin)
@@ -72,7 +72,7 @@ var IFrameIO = /** @class */ (function () {
         this.emit('ping');
         return this;
     };
-    IFrameIO.prototype.listen = function (hostOrigin) {
+    IOF.prototype.listen = function (hostOrigin) {
         // Listening to connection from the content window
         var _this = this;
         this.peer.type = 'IFRAME'; // iframe.io connection listener is automatically set as IFRAME
@@ -109,7 +109,7 @@ var IFrameIO = /** @class */ (function () {
         }, false);
         return this;
     };
-    IFrameIO.prototype.fire = function (_event, payload, callback) {
+    IOF.prototype.fire = function (_event, payload, callback) {
         var _this = this;
         // Volatile event
         if (!this.Events[_event]
@@ -137,7 +137,7 @@ var IFrameIO = /** @class */ (function () {
         // Fire listeners
         listeners.map(function (fn) { return payload ? fn(payload, callbackFn) : fn(callbackFn); });
     };
-    IFrameIO.prototype.emit = function (_event, payload, fn) {
+    IOF.prototype.emit = function (_event, payload, fn) {
         if (!this.peer.source)
             throw new Error('No Connection initiated');
         if (typeof payload == 'function') {
@@ -157,7 +157,7 @@ var IFrameIO = /** @class */ (function () {
         this.peer.source.postMessage(newObject({ _event: _event, payload: payload, callback: hasCallback }), this.peer.origin);
         return this;
     };
-    IFrameIO.prototype.on = function (_event, fn) {
+    IOF.prototype.on = function (_event, fn) {
         // Add Event listener
         if (!this.Events[_event])
             this.Events[_event] = [];
@@ -165,7 +165,7 @@ var IFrameIO = /** @class */ (function () {
         this.debug("[".concat(this.peer.type, "] New <").concat(_event, "> listener on"));
         return this;
     };
-    IFrameIO.prototype.once = function (_event, fn) {
+    IOF.prototype.once = function (_event, fn) {
         // Add Once Event listener
         _event += '--@once';
         if (!this.Events[_event])
@@ -174,20 +174,20 @@ var IFrameIO = /** @class */ (function () {
         this.debug("[".concat(this.peer.type, "] New <").concat(_event, " once> listener on"));
         return this;
     };
-    IFrameIO.prototype.off = function (_event, fn) {
+    IOF.prototype.off = function (_event, fn) {
         // Remove Event listener
         delete this.Events[_event];
         typeof fn == 'function' && fn();
         this.debug("[".concat(this.peer.type, "] <").concat(_event, "> listener off"));
         return this;
     };
-    IFrameIO.prototype.removeListeners = function (fn) {
+    IOF.prototype.removeListeners = function (fn) {
         // Clear all event listeners
         this.Events = {};
         typeof fn == 'function' && fn();
         this.debug("[".concat(this.peer.type, "] All listeners removed"));
         return this;
     };
-    return IFrameIO;
+    return IOF;
 }());
-exports.default = IFrameIO;
+exports.default = IOF;
