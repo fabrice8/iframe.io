@@ -1,6 +1,6 @@
 {
   "name": "iframe.io",
-  "version": "0.0.9",
+  "version": "0.0.10",
   "description": "Easy and friendly API to connect and interact between content window and its containing iframe",
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
