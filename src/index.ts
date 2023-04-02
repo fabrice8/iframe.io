@@ -1,14 +1,14 @@
 
-import type { 
+import type {
   Options, 
   RegisteredEvents, 
   Peer, 
   PeerType,
   Message, 
   MessageData, 
-  Listener, 
+  Listener,
   CallbackFunction
-} from '..'
+} from './types'
 
 function newObject( data: object ){
   return JSON.parse( JSON.stringify( data ) )

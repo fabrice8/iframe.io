@@ -62,11 +62,11 @@ var IFrameIO = /** @class */ (function () {
             // Handshake or availability check events
             if (_event == 'pong') {
                 // Content Window is connected to iframe
-                _this.trigger('connect');
+                _this.fire('connect');
                 return _this.debug("[".concat(_this.peer.type, "] connected"));
             }
-            // Trigger available event listeners
-            _this.trigger(_event, payload, callback);
+            // Fire available event listeners
+            _this.fire(_event, payload, callback);
         }, false);
         this.debug("[".concat(this.peer.type, "] Initiate connection: IFrame origin <").concat(iframeOrigin, ">"));
         this.emit('ping');
@@ -101,15 +101,15 @@ var IFrameIO = /** @class */ (function () {
             if (_event == 'ping') {
                 _this.emit('pong');
                 // Iframe is connected to content window
-                _this.trigger('connect');
+                _this.fire('connect');
                 return _this.debug("[".concat(_this.peer.type, "] connected"));
             }
-            // Trigger available event listeners
-            _this.trigger(_event, payload, callback);
+            // Fire available event listeners
+            _this.fire(_event, payload, callback);
         }, false);
         return this;
     };
-    IFrameIO.prototype.trigger = function (_event, payload, callback) {
+    IFrameIO.prototype.fire = function (_event, payload, callback) {
         var _this = this;
         // Volatile event
         if (!this.Events[_event]
@@ -129,12 +129,12 @@ var IFrameIO = /** @class */ (function () {
             // Once triggable event
             _event += '--@once';
             listeners = this.Events[_event];
-            // Delete once event listeners after triggered
+            // Delete once event listeners after fired
             delete this.Events[_event];
         }
         else
             listeners = this.Events[_event];
-        // Trigger listeners
+        // Fire listeners
         listeners.map(function (fn) { return payload ? fn(payload, callbackFn) : fn(callbackFn); });
     };
     IFrameIO.prototype.emit = function (_event, payload, fn) {

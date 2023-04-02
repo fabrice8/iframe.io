@@ -3,14 +3,7 @@
   "version": "0.0.8",
   "description": "Easy and friendly API to connect and interact between content window and its containing iframe",
   "main": "./dist/index.js",
-  "types": "./src/index.d.ts",
-  "exports": {
-    ".": {
-      "import": "./dist/index.js",
-      "require": "./dist/index.js",
-      "types": "./src/index.d.ts"
-    }
-  },
+  "types": "./src/types/*.d.ts",
   "private": false,
   "scripts": {
     "compile": "rimraf ./dist && tsc",
@@ -27,7 +20,8 @@
     "typescript": "^4.5.5"
   },
   "files": [
-    "dist/"
+    "dist/",
+    "src/"
   ],
   "directories": {
     "example": "example/",
