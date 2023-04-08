@@ -209,7 +209,7 @@ export default class IOF {
 		return this
 	}
 
-	off( _event: string, fn: Listener ){
+	off( _event: string, fn?: Listener ){
 		// Remove Event listener
 		delete this.Events[ _event ]
 		typeof fn == 'function' && fn()
@@ -218,7 +218,7 @@ export default class IOF {
 		return this
 	}
 
-	removeListeners( fn: Listener ){
+	removeListeners( fn?: Listener ){
     // Clear all event listeners
 		this.Events = {}
 		typeof fn == 'function' && fn()
