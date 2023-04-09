@@ -32,7 +32,7 @@ export default class IOF {
     initiate(contentWindow: MessageEventSource, iframeOrigin: string): this;
     listen(hostOrigin?: string): this;
     fire(_event: string, payload?: MessageData['payload'], callback?: boolean): void;
-    emit(_event: string, payload?: MessageData['payload'], fn?: Listener): this;
+    emit(_event: string, payload?: MessageData['payload'], fn?: CallbackFunction): this;
     on(_event: string, fn: Listener): this;
     once(_event: string, fn: Listener): this;
     off(_event: string, fn?: Listener): this;
