@@ -35,6 +35,6 @@ export default class IOF {
     emit(_event: string, payload?: MessageData['payload'], fn?: Listener): this;
     on(_event: string, fn: Listener): this;
     once(_event: string, fn: Listener): this;
-    off(_event: string, fn: Listener): this;
-    removeListeners(fn: Listener): this;
+    off(_event: string, fn?: Listener): this;
+    removeListeners(fn?: Listener): this;
 }

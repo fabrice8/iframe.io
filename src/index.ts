@@ -165,7 +165,7 @@ export default class IOF {
     listeners.map( fn => payload ? fn( payload, callbackFn ) : fn( callbackFn ) )
   }
 
-  emit( _event: string, payload?: MessageData['payload'], fn?: Listener ){
+  emit( _event: string, payload?: MessageData['payload'], fn?: CallbackFunction ){
 
     if( !this.peer.source )
       throw new Error('No Connection initiated')
@@ -178,7 +178,7 @@ export default class IOF {
     // Acknowledge/callback event listener
     let hasCallback = false
     if( typeof fn === 'function' ){
-      const callbackFunction = fn as CallbackFunction
+      const callbackFunction = fn
 
 		  this.once( _event +'--@callback', ({ error, args }) => callbackFunction( error, ...args ) )
       hasCallback = true
