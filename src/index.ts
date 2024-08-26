@@ -6,7 +6,7 @@ export type Listener = ( payload?: any, callback?: CallbackFunction ) => void
 
 export type Options = {
   type?: PeerType
-  debug?: boolean
+  // debug?: boolean
 }
 
 export interface RegisteredEvents {
@@ -22,7 +22,7 @@ export type Peer = {
 export type MessageData = {
   _event: string
   payload: any
-  callback: boolean
+  cid: boolean
 }
 
 export type Message = {
@@ -35,14 +35,17 @@ function newObject( data: object ){
   return JSON.parse( JSON.stringify( data ) )
 }
 
-export default class IOF {
+const callbackId = () => {
+  const rmin = 10, rmax = 9999
+  return Date.now() + String( Math.floor( Math.random() * ( rmax - rmin + 1 )+( rmin + 1 ) ) )
+}
 
+export default class IOF {
   Events: RegisteredEvents
   peer: Peer
   options: Options
 
   constructor( options: Options ){
-
     if( options && typeof options !== 'object' )
       throw new Error('Invalid Options')
     
@@ -54,7 +57,7 @@ export default class IOF {
       this.peer.type = options.type.toUpperCase() as PeerType
   }
 
-  debug( ...args: any[] ){ this.options && this.options.debug && console.log( ...args ) }
+  debug( ...args: any[] ){ console.debug( ...args ) }
 
   initiate( contentWindow: MessageEventSource, iframeOrigin: string ){
     // Establish a connection with an iframe containing in the current window
@@ -74,7 +77,7 @@ export default class IOF {
           || typeof data !== 'object'
           || !data.hasOwnProperty('_event') ) return
           
-      const { _event, payload, callback } = data as Message['data']
+      const { _event, payload, cid } = data as Message['data']
       this.debug( `[${this.peer.type}] Message: ${_event}`, payload || '' )
 
       // Handshake or availability check events
@@ -85,7 +88,7 @@ export default class IOF {
       }
 
       // Fire available event listeners
-      this.fire( _event, payload, callback )
+      this.fire( _event, payload, cid )
     }, false )
 
     this.debug(`[${this.peer.type}] Initiate connection: IFrame origin <${iframeOrigin}>`)
@@ -120,7 +123,7 @@ export default class IOF {
       else if( origin !== this.peer.origin )
         throw new Error('Invalid Origin')
       
-      const { _event, payload, callback } = data
+      const { _event, payload, cid } = data
       this.debug( `[${this.peer.type}] Message: ${_event}`, payload || '' )
 
       // Handshake or availability check events
@@ -133,21 +136,21 @@ export default class IOF {
       }
 
       // Fire available event listeners
-      this.fire( _event, payload, callback )
+      this.fire( _event, payload, cid )
     }, false )
 
     return this
   }
 
-  fire( _event: string, payload?: MessageData['payload'], callback?: boolean ){
+  fire( _event: string, payload?: MessageData['payload'], cid?: boolean ){
     // Volatile event
     if( !this.Events[ _event ] 
         && !this.Events[ _event +'--@once'] )
       return this.debug(`[${this.peer.type}] No <${_event}> listener defined`)
 
-    const callbackFn = callback ? 
+    const callbackFn = cid ?
                   ( error: boolean | string, ...args: any[] ): void => {
-                    this.emit( _event +'--@callback', { error: error || false, args } )
+                    this.emit(`${_event}--${cid}--@callback`, { error: error || false, args } )
                     return
                   } : undefined
     let listeners: Listener[] = []
@@ -162,7 +165,7 @@ export default class IOF {
     else listeners = this.Events[ _event ]
     
     // Fire listeners
-    listeners.map( fn => payload ? fn( payload, callbackFn ) : fn( callbackFn ) )
+    listeners.map( fn => payload !== undefined ? fn( payload, callbackFn ) : fn( callbackFn ) )
   }
 
   emit( _event: string, payload?: MessageData['payload'], fn?: CallbackFunction ){
@@ -176,15 +179,15 @@ export default class IOF {
 		}
 
     // Acknowledge/callback event listener
-    let hasCallback = false
+    let cid
     if( typeof fn === 'function' ){
       const callbackFunction = fn
 
-		  this.once( _event +'--@callback', ({ error, args }) => callbackFunction( error, ...args ) )
-      hasCallback = true
+      cid = callbackId()
+		  this.once(`${_event}--${cid}--@callback`, ({ error, args }) => callbackFunction( error, ...args ) )
     }
     
-    this.peer.source.postMessage( newObject({ _event, payload, callback: hasCallback }), this.peer.origin as string )
+    this.peer.source.postMessage( newObject({ _event, payload, cid }), this.peer.origin as string )
 
 		return this
   }
