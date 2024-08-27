@@ -23,6 +23,10 @@ Object.defineProperty(exports, "__esModule", { value: true });
 function newObject(data) {
     return JSON.parse(JSON.stringify(data));
 }
+var callbackId = function () {
+    var rmin = 10, rmax = 9999;
+    return Date.now() + String(Math.floor(Math.random() * (rmax - rmin + 1) + (rmin + 1)));
+};
 var IOF = /** @class */ (function () {
     function IOF(options) {
         if (options && typeof options !== 'object')
@@ -38,7 +42,7 @@ var IOF = /** @class */ (function () {
         for (var _i = 0; _i < arguments.length; _i++) {
             args[_i] = arguments[_i];
         }
-        this.options && this.options.debug && console.log.apply(console, args);
+        console.debug.apply(console, args);
     };
     IOF.prototype.initiate = function (contentWindow, iframeOrigin) {
         var _this = this;
@@ -57,7 +61,7 @@ var IOF = /** @class */ (function () {
                 || typeof data !== 'object'
                 || !data.hasOwnProperty('_event'))
                 return;
-            var _b = data, _event = _b._event, payload = _b.payload, callback = _b.callback;
+            var _b = data, _event = _b._event, payload = _b.payload, cid = _b.cid;
             _this.debug("[".concat(_this.peer.type, "] Message: ").concat(_event), payload || '');
             // Handshake or availability check events
             if (_event == 'pong') {
@@ -66,7 +70,7 @@ var IOF = /** @class */ (function () {
                 return _this.debug("[".concat(_this.peer.type, "] connected"));
             }
             // Fire available event listeners
-            _this.fire(_event, payload, callback);
+            _this.fire(_event, payload, cid);
         }, false);
         this.debug("[".concat(this.peer.type, "] Initiate connection: IFrame origin <").concat(iframeOrigin, ">"));
         this.emit('ping');
@@ -95,7 +99,7 @@ var IOF = /** @class */ (function () {
             // Origin different from handshaked source origin
             else if (origin !== _this.peer.origin)
                 throw new Error('Invalid Origin');
-            var _event = data._event, payload = data.payload, callback = data.callback;
+            var _event = data._event, payload = data.payload, cid = data.cid;
             _this.debug("[".concat(_this.peer.type, "] Message: ").concat(_event), payload || '');
             // Handshake or availability check events
             if (_event == 'ping') {
@@ -105,23 +109,23 @@ var IOF = /** @class */ (function () {
                 return _this.debug("[".concat(_this.peer.type, "] connected"));
             }
             // Fire available event listeners
-            _this.fire(_event, payload, callback);
+            _this.fire(_event, payload, cid);
         }, false);
         return this;
     };
-    IOF.prototype.fire = function (_event, payload, callback) {
+    IOF.prototype.fire = function (_event, payload, cid) {
         var _this = this;
         // Volatile event
         if (!this.Events[_event]
             && !this.Events[_event + '--@once'])
             return this.debug("[".concat(this.peer.type, "] No <").concat(_event, "> listener defined"));
-        var callbackFn = callback ?
+        var callbackFn = cid ?
             function (error) {
                 var args = [];
                 for (var _i = 1; _i < arguments.length; _i++) {
                     args[_i - 1] = arguments[_i];
                 }
-                _this.emit(_event + '--@callback', { error: error || false, args: args });
+                _this.emit("".concat(_event, "--").concat(cid, "--@callback"), { error: error || false, args: args });
                 return;
             } : undefined;
         var listeners = [];
@@ -135,7 +139,7 @@ var IOF = /** @class */ (function () {
         else
             listeners = this.Events[_event];
         // Fire listeners
-        listeners.map(function (fn) { return payload ? fn(payload, callbackFn) : fn(callbackFn); });
+        listeners.map(function (fn) { return payload !== undefined ? fn(payload, callbackFn) : fn(callbackFn); });
     };
     IOF.prototype.emit = function (_event, payload, fn) {
         if (!this.peer.source)
@@ -145,16 +149,16 @@ var IOF = /** @class */ (function () {
             payload = null;
         }
         // Acknowledge/callback event listener
-        var hasCallback = false;
+        var cid;
         if (typeof fn === 'function') {
             var callbackFunction_1 = fn;
-            this.once(_event + '--@callback', function (_a) {
+            cid = callbackId();
+            this.once("".concat(_event, "--").concat(cid, "--@callback"), function (_a) {
                 var error = _a.error, args = _a.args;
                 return callbackFunction_1.apply(void 0, __spreadArray([error], args, false));
             });
-            hasCallback = true;
         }
-        this.peer.source.postMessage(newObject({ _event: _event, payload: payload, callback: hasCallback }), this.peer.origin);
+        this.peer.source.postMessage(newObject({ _event: _event, payload: payload, cid: cid }), this.peer.origin);
         return this;
     };
     IOF.prototype.on = function (_event, fn) {

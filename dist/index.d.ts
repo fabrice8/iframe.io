@@ -3,7 +3,6 @@ export declare type CallbackFunction = (error: boolean | string, ...args: any[])
 export declare type Listener = (payload?: any, callback?: CallbackFunction) => void;
 export declare type Options = {
     type?: PeerType;
-    debug?: boolean;
 };
 export interface RegisteredEvents {
     [index: string]: Listener[];
@@ -16,7 +15,7 @@ export declare type Peer = {
 export declare type MessageData = {
     _event: string;
     payload: any;
-    callback: boolean;
+    cid: boolean;
 };
 export declare type Message = {
     origin: string;
@@ -31,7 +30,7 @@ export default class IOF {
     debug(...args: any[]): void;
     initiate(contentWindow: MessageEventSource, iframeOrigin: string): this;
     listen(hostOrigin?: string): this;
-    fire(_event: string, payload?: MessageData['payload'], callback?: boolean): void;
+    fire(_event: string, payload?: MessageData['payload'], cid?: boolean): void;
     emit(_event: string, payload?: MessageData['payload'], fn?: CallbackFunction): this;
     on(_event: string, fn: Listener): this;
     once(_event: string, fn: Listener): this;

@@ -175,7 +175,7 @@ export default class IOF {
 
 		if( typeof payload == 'function' ){
 			fn = payload
-			payload = null
+			payload = undefined
 		}
 
     // Acknowledge/callback event listener
