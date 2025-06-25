@@ -75,7 +75,7 @@ export default class IOF {
     once(_event: string, fn: Listener): this;
     off(_event: string, fn?: Listener): this;
     removeListeners(fn?: Listener): this;
-    emitAsync<T = any, R = any>(_event: string, payload?: T): Promise<R>;
+    emitAsync<T = any, R = any>(_event: string, payload?: T, timeout?: number): Promise<R>;
     onceAsync<T = any>(_event: string): Promise<T>;
     connectAsync(timeout?: number): Promise<void>;
     private cleanup;

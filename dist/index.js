@@ -35,18 +35,21 @@ function sanitizePayload(payload, maxSize) {
     if (!payload)
         return payload;
     var size = getMessageSize(payload);
-    if (size > maxSize) {
+    if (size > maxSize)
         throw new Error("Message size ".concat(size, " exceeds limit ").concat(maxSize));
-    }
     // Basic sanitization - remove functions and undefined values
     return JSON.parse(JSON.stringify(payload));
 }
 var ackId = function () {
-    var rmin = 100000, rmax = 999999;
-    var timestamp = Date.now();
-    var random = Math.floor(Math.random() * (rmax - rmin + 1) + rmin);
+    var rmin = 100000, rmax = 999999, timestamp = Date.now(), random = Math.floor(Math.random() * (rmax - rmin + 1) + rmin);
     return "".concat(timestamp, "_").concat(random);
 };
+var RESERVED_EVENTS = [
+    'ping',
+    'pong',
+    '__heartbeat',
+    '__heartbeat_response'
+];
 var IOF = /** @class */ (function () {
     function IOF(options) {
         if (options === void 0) { options = {}; }
@@ -81,7 +84,8 @@ var IOF = /** @class */ (function () {
             if (_this.isConnected()) {
                 var now = Date.now();
                 // Check if peer is still responsive
-                if (_this.peer.lastHeartbeat && (now - _this.peer.lastHeartbeat) > (_this.options.heartbeatInterval * 2)) {
+                if (_this.peer.lastHeartbeat
+                    && (now - _this.peer.lastHeartbeat) > (_this.options.heartbeatInterval * 2)) {
                     _this.debug("[".concat(_this.peer.type, "] Heartbeat timeout detected"));
                     _this.handleConnectionLoss();
                     return;
@@ -132,11 +136,11 @@ var IOF = /** @class */ (function () {
             // For IFRAME type, just wait for incoming connection
             // Set timeout for this reconnection attempt
             setTimeout(function () {
-                if (!_this.peer.connected) {
-                    _this.reconnectAttempts < _this.maxReconnectAttempts
-                        ? _this.attemptReconnection()
-                        : _this.fire('reconnection_failed', { attempts: _this.reconnectAttempts });
-                }
+                if (_this.peer.connected)
+                    return;
+                _this.reconnectAttempts < _this.maxReconnectAttempts
+                    ? _this.attemptReconnection()
+                    : _this.fire('reconnection_failed', { attempts: _this.reconnectAttempts });
             }, _this.options.connectionTimeout);
         }, delay);
     };
@@ -273,7 +277,11 @@ var IOF = /** @class */ (function () {
             try {
                 // Enhanced security: check host origin where event must only come from
                 if (hostOrigin && hostOrigin !== origin) {
-                    _this.fire('error', { type: 'INVALID_ORIGIN', expected: hostOrigin, received: origin });
+                    _this.fire('error', {
+                        type: 'INVALID_ORIGIN',
+                        expected: hostOrigin,
+                        received: origin
+                    });
                     return;
                 }
                 // Enhanced security: check valid message structure
@@ -288,7 +296,11 @@ var IOF = /** @class */ (function () {
                 }
                 // Origin different from handshaked source origin
                 else if (origin !== _this.peer.origin) {
-                    _this.fire('error', { type: 'ORIGIN_MISMATCH', expected: _this.peer.origin, received: origin });
+                    _this.fire('error', {
+                        type: 'ORIGIN_MISMATCH',
+                        expected: _this.peer.origin,
+                        received: origin
+                    });
                     return;
                 }
                 var _event = data._event, payload = data.payload, cid = data.cid, timestamp = data.timestamp;
@@ -334,8 +346,7 @@ var IOF = /** @class */ (function () {
     IOF.prototype.fire = function (_event, payload, cid) {
         var _this = this;
         // Volatile event - check if any listeners exist
-        if (!this.Events[_event]
-            && !this.Events[_event + '--@once'])
+        if (!this.Events[_event] && !this.Events[_event + '--@once'])
             return this.debug("[".concat(this.peer.type, "] No <").concat(_event, "> listener defined"));
         var ackFn = cid
             ? function (error) {
@@ -376,8 +387,11 @@ var IOF = /** @class */ (function () {
         // Check rate limiting
         if (!this.checkRateLimit())
             return this;
-        // Queue message if not connected (except for connection-related events)
-        if (!this.isConnected() && !['ping', 'pong', '__heartbeat', '__heartbeat_response'].includes(_event)) {
+        /**
+         * Queue message if not connected: Except for
+         * connection-related events
+         */
+        if (!this.isConnected() && !RESERVED_EVENTS.includes(_event)) {
             this.queueMessage(_event, payload, fn);
             return this;
         }
@@ -391,7 +405,9 @@ var IOF = /** @class */ (function () {
         }
         try {
             // Enhanced security: sanitize and validate payload
-            var sanitizedPayload = payload ? sanitizePayload(payload, this.options.maxMessageSize) : payload;
+            var sanitizedPayload = payload
+                ? sanitizePayload(payload, this.options.maxMessageSize)
+                : payload;
             // Acknowledge event listener
             var cid = void 0;
             if (typeof fn === 'function') {
@@ -419,9 +435,8 @@ var IOF = /** @class */ (function () {
                 error: error instanceof Error ? error.message : String(error)
             });
             // Call acknowledgment with error if provided
-            if (typeof fn === 'function') {
-                fn(error instanceof Error ? error.message : String(error));
-            }
+            typeof fn === 'function'
+                && fn(error instanceof Error ? error.message : String(error));
         }
         return this;
     };
@@ -468,21 +483,27 @@ var IOF = /** @class */ (function () {
         this.debug("[".concat(this.peer.type, "] All listeners removed"));
         return this;
     };
-    IOF.prototype.emitAsync = function (_event, payload) {
+    IOF.prototype.emitAsync = function (_event, payload, timeout) {
         var _this = this;
+        if (timeout === void 0) { timeout = 5000; }
         return new Promise(function (resolve, reject) {
+            var timeoutId = setTimeout(function () {
+                reject(new Error("Event '".concat(_event, "' acknowledgment timeout after ").concat(timeout, "ms")));
+            }, timeout);
             try {
                 _this.emit(_event, payload, function (error) {
                     var args = [];
                     for (var _i = 1; _i < arguments.length; _i++) {
                         args[_i - 1] = arguments[_i];
                     }
+                    clearTimeout(timeoutId);
                     error
                         ? reject(new Error(typeof error === 'string' ? error : 'Ack error'))
                         : resolve(args.length === 0 ? undefined : args.length === 1 ? args[0] : args);
                 });
             }
             catch (error) {
+                clearTimeout(timeoutId);
                 reject(error);
             }
         });
@@ -493,14 +514,13 @@ var IOF = /** @class */ (function () {
     };
     IOF.prototype.connectAsync = function (timeout) {
         var _this = this;
-        if (timeout === void 0) { timeout = 5000; }
         return new Promise(function (resolve, reject) {
             if (_this.isConnected())
                 return resolve();
             var timeoutId = setTimeout(function () {
                 _this.off('connect', connectHandler);
                 reject(new Error('Connection timeout'));
-            }, timeout);
+            }, timeout || _this.options.connectionTimeout);
             var connectHandler = function () {
                 clearTimeout(timeoutId);
                 resolve();
