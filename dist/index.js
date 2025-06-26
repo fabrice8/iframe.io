@@ -242,7 +242,8 @@ var IOF = /** @class */ (function () {
                     _this.startHeartbeat();
                     _this.fire('connect');
                     _this.processMessageQueue();
-                    return _this.debug("[".concat(_this.peer.type, "] connected"));
+                    _this.debug("[".concat(_this.peer.type, "] connected"));
+                    return;
                 }
                 // Fire available event listeners
                 _this.fire(_event, payload, cid);
@@ -326,7 +327,8 @@ var IOF = /** @class */ (function () {
                     _this.startHeartbeat();
                     _this.fire('connect');
                     _this.processMessageQueue();
-                    return _this.debug("[".concat(_this.peer.type, "] connected"));
+                    _this.debug("[".concat(_this.peer.type, "] connected"));
+                    return;
                 }
                 // Fire available event listeners
                 _this.fire(_event, payload, cid);
@@ -346,8 +348,10 @@ var IOF = /** @class */ (function () {
     IOF.prototype.fire = function (_event, payload, cid) {
         var _this = this;
         // Volatile event - check if any listeners exist
-        if (!this.Events[_event] && !this.Events[_event + '--@once'])
-            return this.debug("[".concat(this.peer.type, "] No <").concat(_event, "> listener defined"));
+        if (!this.Events[_event] && !this.Events[_event + '--@once']) {
+            this.debug("[".concat(this.peer.type, "] No <").concat(_event, "> listener defined"));
+            return;
+        }
         var ackFn = cid
             ? function (error) {
                 var args = [];
@@ -541,7 +545,7 @@ var IOF = /** @class */ (function () {
         }
     };
     IOF.prototype.disconnect = function (fn) {
-        // Clean disconnect method
+        // Cleanup on disconnect
         this.cleanup();
         this.peer.connected = false;
         this.peer.source = undefined;
