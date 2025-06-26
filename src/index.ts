@@ -312,11 +312,13 @@ export default class IOF {
           this.peer.connected = true
           this.reconnectAttempts = 0
           this.peer.lastHeartbeat = Date.now()
+          
           this.startHeartbeat()
           this.fire('connect')
           this.processMessageQueue()
+          this.debug(`[${this.peer.type}] connected`)
 
-          return this.debug(`[${this.peer.type}] connected`)
+          return
         }
 
         // Fire available event listeners
@@ -347,6 +349,7 @@ export default class IOF {
     this.peer.type = 'IFRAME' // iframe.io connection listener is automatically set as IFRAME
     this.peer.connected = false
     this.reconnectAttempts = 0
+
     this.debug(`[${this.peer.type}] Listening to connect${hostOrigin ? `: Host <${hostOrigin}>` : ''}`)
 
     // Clean up existing listener if any
@@ -414,7 +417,8 @@ export default class IOF {
           this.fire('connect')
           this.processMessageQueue()
 
-          return this.debug(`[${this.peer.type}] connected`)
+          this.debug(`[${this.peer.type}] connected`)
+          return
         }
 
         // Fire available event listeners
@@ -437,8 +441,10 @@ export default class IOF {
 
   fire( _event: string, payload?: MessageData['payload'], cid?: string ){
     // Volatile event - check if any listeners exist
-    if( !this.Events[_event] && !this.Events[_event + '--@once'] )
-      return this.debug(`[${this.peer.type}] No <${_event}> listener defined`)
+    if( !this.Events[_event] && !this.Events[_event + '--@once'] ){
+      this.debug(`[${this.peer.type}] No <${_event}> listener defined`)
+      return
+    }
 
     const ackFn = cid
       ? ( error: boolean | string, ...args: any[] ): void => {
@@ -590,7 +596,7 @@ export default class IOF {
     return new Promise(( resolve, reject ) => {
       const timeoutId = setTimeout(() => {
         reject( new Error(`Event '${_event}' acknowledgment timeout after ${timeout}ms`) )
-      }, timeout)
+      }, timeout )
 
       try {
         this.emit( _event, payload, ( error, ...args ) => {
@@ -646,7 +652,7 @@ export default class IOF {
   }
 
   disconnect( fn?: () => void ){
-    // Clean disconnect method
+    // Cleanup on disconnect
     this.cleanup()
 
     this.peer.connected = false
@@ -656,6 +662,7 @@ export default class IOF {
     this.messageQueue = []
     this.messageRateTracker = []
     this.reconnectAttempts = 0
+
     this.removeListeners()
 
     typeof fn == 'function' && fn()

@@ -1,18 +1,19 @@
 # iframe.io
 
-Easy and friendly API to connect and interact between content window and its containing iframe with enhanced features like heartbeat monitoring, automatic reconnection, message queuing, and rate limiting.
+Easy and friendly API to connect and interact between content window and its containing iframe with enhanced security, reliability, and modern async/await support.
 
-## Features
+## New Features & Improvements
 
-- 🔄 **Bi-directional Communication** - Seamless messaging between parent window and iframe
-- 💓 **Heartbeat Monitoring** - Automatic connection health checking
-- 🔌 **Auto Reconnection** - Automatic reconnection with exponential backoff
-- 📦 **Message Queuing** - Queue messages when connection is lost
-- 🛡️ **Security** - Origin validation and message sanitization
-- ⚡ **Rate Limiting** - Prevent message flooding
-- 🎯 **Event System** - Robust event-driven architecture
-- ✨ **Promise Support** - Async/await compatible methods
-- 📊 **Connection Stats** - Real-time connection statistics
+### 🆕 Version 1.1.0 Updates
+
+- **🔒 Enhanced Security**: Origin validation, message sanitization, and payload size limits
+- **🔄 Auto-Reconnection**: Automatic reconnection with exponential backoff strategy
+- **💓 Heartbeat Monitoring**: Connection health monitoring with configurable intervals
+- **📦 Message Queuing**: Queue messages when disconnected and replay on reconnection
+- **⚡ Rate Limiting**: Configurable message rate limiting to prevent spam
+- **🎯 Promise Support**: Modern async/await APIs with timeout handling
+- **📊 Connection Statistics**: Real-time connection and performance metrics
+- **🛡️ Comprehensive Error Handling**: Detailed error types and handling mechanisms
 
 ## Installation
 
@@ -20,429 +21,364 @@ Easy and friendly API to connect and interact between content window and its con
 npm install iframe.io
 ```
 
-## Quick Start
+## Basic Usage
 
-### Parent Window (WINDOW type)
+### Parent Window (WINDOW peer)
 
 ```javascript
 import IOF from 'iframe.io'
 
-// Create iframe and get reference
-const iframe = document.createElement('iframe')
-iframe.src = 'https://example.com/iframe-content'
-document.body.appendChild(iframe)
+const iframe = document.getElementById('myIframe')
+const iframeIO = new IOF({
+  type: 'WINDOW',
+  debug: true
+})
 
-// Initialize connection
-const iof = new IOF({ type: 'WINDOW', debug: true })
+// Establish connection
+iframeIO.initiate(iframe.contentWindow, 'https://child-domain.com')
 
-iframe.onload = () => {
-  // Initiate connection with iframe
-  iof.initiate(iframe.contentWindow, 'https://example.com')
-  
-  // Listen for connection
-  iof.on('connect', () => {
-    console.log('Connected to iframe!')
-    
-    // Send message
-    iof.emit('hello', { message: 'Hello from parent!' })
-  })
-  
-  // Listen for messages
-  iof.on('response', (data) => {
-    console.log('Received:', data)
-  })
-}
+// Listen for connection
+iframeIO.on('connect', () => {
+  console.log('Connected to iframe!')
+
+  // Send a message
+  iframeIO.emit('hello', { message: 'Hello from parent!' })
+})
+
+// Listen for messages
+iframeIO.on('response', (data) => {
+  console.log('Received:', data)
+})
 ```
 
-### Iframe Content (IFRAME type)
+### Child Window (IFRAME peer)
 
 ```javascript
 import IOF from 'iframe.io'
 
-// Create connection listener
-const iof = new IOF({ type: 'IFRAME', debug: true })
+const iframeIO = new IOF({
+  type: 'IFRAME',
+  debug: true
+})
 
 // Listen for parent connection
-iof.listen('https://parent-domain.com')
+iframeIO.listen('https://parent-domain.com')
 
 // Handle connection
-iof.on('connect', () => {
+iframeIO.on('connect', () => {
   console.log('Connected to parent!')
 })
 
 // Listen for messages
-iof.on('hello', (data, ack) => {
-  console.log('Received from parent:', data)
-  
-  // Send response
-  iof.emit('response', { message: 'Hello from iframe!' })
-  
-  // Acknowledge receipt (optional)
-  if (ack) ack(false, 'Message received')
-})
-```
-
-## API Reference
-
-### Constructor
-
-```javascript
-new IOF(options?)
-```
-
-#### Options
-
-| Option | Type | Default | Description |
-|--------|------|---------|-------------|
-| `type` | `'WINDOW' \| 'IFRAME'` | `'IFRAME'` | Connection type |
-| `debug` | `boolean` | `false` | Enable debug logging |
-| `heartbeatInterval` | `number` | `30000` | Heartbeat interval in ms |
-| `connectionTimeout` | `number` | `10000` | Connection timeout in ms |
-| `maxMessageSize` | `number` | `1048576` | Max message size (1MB) |
-| `maxMessagesPerSecond` | `number` | `100` | Rate limit for messages |
-| `autoReconnect` | `boolean` | `true` | Enable auto reconnection |
-| `messageQueueSize` | `number` | `50` | Max queued messages |
-
-### Connection Methods
-
-#### `initiate(contentWindow, iframeOrigin)`
-
-Establish connection with an iframe (WINDOW type only).
-
-```javascript
-iof.initiate(iframe.contentWindow, 'https://iframe-origin.com')
-```
-
-**Parameters:**
-- `contentWindow` - The iframe's contentWindow
-- `iframeOrigin` - The iframe's origin URL
-
-#### `listen(hostOrigin?)`
-
-Listen for connection from parent window (IFRAME type).
-
-```javascript
-iof.listen('https://parent-origin.com') // Optional origin restriction
-```
-
-**Parameters:**
-- `hostOrigin` (optional) - Restrict connections to specific origin
-
-#### `disconnect(callback?)`
-
-Disconnect and clean up all resources.
-
-```javascript
-iof.disconnect(() => {
-  console.log('Disconnected!')
-})
-```
-
-### Messaging Methods
-
-#### `emit(event, payload?, callback?)`
-
-Send a message to the peer.
-
-```javascript
-// Simple message
-iof.emit('myEvent', { data: 'hello' })
-
-// With acknowledgment
-iof.emit('myEvent', { data: 'hello' }, (error, response) => {
-  if (error) {
-    console.error('Error:', error)
-  } else {
-    console.log('Response:', response)
-  }
-})
-
-// Callback as second parameter
-iof.emit('myEvent', (error, response) => {
-  console.log('Response:', response)
-})
-```
-
-#### `on(event, listener)`
-
-Add event listener.
-
-```javascript
-iof.on('myEvent', (data, ack) => {
+iframeIO.on('hello', (data) => {
   console.log('Received:', data)
-  
-  // Send acknowledgment (optional)
-  if (ack) ack(false, 'Success response')
+
+  // Send response
+  iframeIO.emit('response', { received: true })
 })
 ```
 
-#### `once(event, listener)`
-
-Add one-time event listener.
+## Enhanced Configuration Options
 
 ```javascript
-iof.once('myEvent', (data) => {
-  console.log('This will only fire once:', data)
+const iframeIO = new IOF({
+  type: 'WINDOW',                    // 'WINDOW' or 'IFRAME'
+  debug: false,                      // Enable debug logging
+  heartbeatInterval: 30000,          // Heartbeat interval in ms (30s)
+  connectionTimeout: 10000,          // Connection timeout in ms (10s)
+  maxMessageSize: 1024 * 1024,       // Max message size in bytes (1MB)
+  maxMessagesPerSecond: 100,         // Rate limit (100 messages/second)
+  autoReconnect: true,               // Enable automatic reconnection
+  messageQueueSize: 50               // Max queued messages when disconnected
 })
 ```
 
-#### `off(event, listener?)`
+## New Async/Await Support
 
-Remove event listener(s).
-
-```javascript
-// Remove specific listener
-iof.off('myEvent', myListener)
-
-// Remove all listeners for event
-iof.off('myEvent')
-```
-
-#### `removeListeners(callback?)`
-
-Remove all event listeners.
+### Send Messages with Acknowledgments
 
 ```javascript
-iof.removeListeners(() => {
-  console.log('All listeners removed')
-})
-```
-
-### Async Methods
-
-#### `emitAsync(event, payload?)`
-
-Send message and return Promise.
-
-```javascript
+// Send message and wait for acknowledgment with timeout
 try {
-  const response = await iof.emitAsync('getData', { id: 123 })
+  const response = await iframeIO.emitAsync('getData', { id: 123 }, 10000) // 10s timeout
   console.log('Response:', response)
 } catch (error) {
-  console.error('Error:', error)
+  console.error('Request failed:', error.message)
 }
-```
 
-#### `onceAsync(event)`
-
-Wait for single event occurrence.
-
-```javascript
-const data = await iof.onceAsync('dataReady')
-console.log('Data received:', data)
-```
-
-#### `connectAsync(timeout?)`
-
-Wait for connection to be established.
-
-```javascript
-try {
-  await iof.connectAsync(5000) // 5 second timeout
-  console.log('Connected!')
-} catch (error) {
-  console.error('Connection timeout')
-}
-```
-
-### Utility Methods
-
-#### `isConnected()`
-
-Check if connection is active.
-
-```javascript
-if (iof.isConnected()) {
-  console.log('Connection is active')
-}
-```
-
-#### `getStats()`
-
-Get connection statistics.
-
-```javascript
-const stats = iof.getStats()
-console.log('Stats:', stats)
-/*
-{
-  connected: true,
-  peerType: 'WINDOW',
-  origin: 'https://example.com',
-  lastHeartbeat: 1640995200000,
-  queuedMessages: 0,
-  reconnectAttempts: 0,
-  activeListeners: 5,
-  messageRate: 10
-}
-*/
-```
-
-#### `clearQueue()`
-
-Clear queued messages.
-
-```javascript
-iof.clearQueue()
-```
-
-## Events
-
-### Built-in Events
-
-| Event | Description | Data |
-|-------|-------------|------|
-| `connect` | Connection established | - |
-| `disconnect` | Connection lost | `{ reason: string }` |
-| `reconnecting` | Reconnection attempt | `{ attempt: number, delay: number }` |
-| `reconnection_failed` | All reconnection attempts failed | `{ attempts: number }` |
-| `error` | Error occurred | `{ type: string, ...details }` |
-
-### Error Types
-
-- `RATE_LIMIT_EXCEEDED` - Message rate limit exceeded
-- `MESSAGE_HANDLING_ERROR` - Error processing received message
-- `EMIT_ERROR` - Error sending message
-- `LISTENER_ERROR` - Error in event listener
-- `INVALID_ORIGIN` - Message from unauthorized origin
-- `ORIGIN_MISMATCH` - Origin doesn't match established connection
-- `NO_CONNECTION` - Attempted to send without connection
-
-## Advanced Usage
-
-### Message Acknowledgments
-
-```javascript
-// Sender
-iof.emit('processData', { data: [...] }, (error, result) => {
-  if (error) {
-    console.error('Processing failed:', error)
-  } else {
-    console.log('Processing result:', result)
-  }
-})
-
-// Receiver
-iof.on('processData', async (data, ack) => {
+// Listen and acknowledge
+iframeIO.on('getData', async (data, ack) => {
   try {
-    const result = await processData(data.data)
-    ack(false, result) // Success: ack(error, ...args)
+    const result = await fetchData(data.id)
+    ack(false, result) // Success: ack(error, ...response)
   } catch (error) {
     ack(error.message) // Error: ack(errorMessage)
   }
 })
 ```
 
-### Connection Monitoring
+### Wait for Connection
 
 ```javascript
-const iof = new IOF({
-  heartbeatInterval: 10000, // 10 seconds
-  connectionTimeout: 5000,  // 5 seconds
-  autoReconnect: true
+// Wait for connection with timeout
+try {
+  await iframeIO.connectAsync(5000) // 5 second timeout
+  console.log('Connection established!')
+} catch (error) {
+  console.error('Connection failed:', error.message)
+}
+
+// Wait for single event
+const userData = await iframeIO.onceAsync('userProfile')
+console.log('User data received:', userData)
+```
+
+## Enhanced Connection Management
+
+### Auto-Reconnection
+
+```javascript
+// Handle connection events
+iframeIO.on('disconnect', (data) => {
+  console.log('Disconnected:', data.reason)
 })
 
-iof.on('disconnect', ({ reason }) => {
-  console.log('Connection lost:', reason)
+iframeIO.on('reconnecting', (data) => {
+  console.log(`Reconnection attempt ${data.attempt}, delay: ${data.delay}ms`)
 })
 
-iof.on('reconnecting', ({ attempt, delay }) => {
-  console.log(`Reconnecting (${attempt}/5) in ${delay}ms`)
-})
-
-iof.on('reconnection_failed', ({ attempts }) => {
-  console.log(`Failed to reconnect after ${attempts} attempts`)
+iframeIO.on('reconnection_failed', (data) => {
+  console.error(`Failed to reconnect after ${data.attempts} attempts`)
 })
 ```
 
-### Message Queuing
+### Connection Statistics
 
 ```javascript
-const iof = new IOF({
-  messageQueueSize: 100,
-  autoReconnect: true
+const stats = iframeIO.getStats()
+console.log(stats)
+// {
+//   connected: true,
+//   peerType: 'WINDOW',
+//   origin: 'https://example.com',
+//   lastHeartbeat: 1609459200000,
+//   queuedMessages: 0,
+//   reconnectAttempts: 0,
+//   activeListeners: 5,
+//   messageRate: 2
+// }
+```
+
+## Security Features
+
+### Origin Validation
+
+```javascript
+// Strict origin checking
+iframeIO.listen('https://trusted-domain.com') // Only accept from this origin
+
+// Error handling for invalid origins
+iframeIO.on('error', (error) => {
+  if (error.type === 'INVALID_ORIGIN') {
+    console.log(`Rejected message from ${error.received}`)
+  }
 })
+```
 
-// Messages sent while disconnected are automatically queued
-iof.emit('queuedMessage', { data: 'This will be queued if disconnected' })
+### Message Sanitization
 
-// Check queue status
-const stats = iof.getStats()
-console.log(`Queued messages: ${stats.queuedMessages}`)
+```javascript
+// Automatic payload sanitization removes functions and undefined values
+iframeIO.emit('data', {
+  text: 'Hello',
+  func: () => {}, // Functions are automatically removed
+  undef: undefined // Undefined values are automatically removed
+})
 ```
 
 ### Rate Limiting
 
 ```javascript
-const iof = new IOF({
-  maxMessagesPerSecond: 50,
-  maxMessageSize: 512 * 1024 // 512KB
+const iframeIO = new IOF({
+  maxMessagesPerSecond: 10 // Limit to 10 messages per second
 })
 
-iof.on('error', ({ type, limit, current }) => {
-  if (type === 'RATE_LIMIT_EXCEEDED') {
-    console.log(`Rate limit exceeded: ${current}/${limit} messages per second`)
+iframeIO.on('error', (error) => {
+  if (error.type === 'RATE_LIMIT_EXCEEDED') {
+    console.log(`Rate limited: ${error.current}/${error.limit}`)
   }
 })
 ```
 
-### Security Best Practices
+## Comprehensive Error Handling
 
 ```javascript
-// Always specify allowed origins
-iof.listen('https://trusted-parent.com')
-
-// Handle security errors
-iof.on('error', ({ type, expected, received }) => {
-  if (type === 'INVALID_ORIGIN') {
-    console.warn(`Rejected message from ${received}, expected ${expected}`)
+iframeIO.on('error', (error) => {
+  switch (error.type) {
+    case 'INVALID_ORIGIN':
+      console.error(`Invalid origin: expected ${error.expected}, got ${error.received}`)
+      break
+    case 'ORIGIN_MISMATCH':
+      console.error(`Origin mismatch: expected ${error.expected}, got ${error.received}`)
+      break
+    case 'RATE_LIMIT_EXCEEDED':
+      console.warn(`Rate limit exceeded: ${error.current}/${error.limit} messages/second`)
+      break
+    case 'MESSAGE_HANDLING_ERROR':
+      console.error(`Error handling event ${error.event}: ${error.error}`)
+      break
+    case 'EMIT_ERROR':
+      console.error(`Error sending event ${error.event}: ${error.error}`)
+      break
+    case 'LISTENER_ERROR':
+      console.error(`Error in listener for ${error.event}: ${error.error}`)
+      break
+    case 'NO_CONNECTION':
+      console.error(`Attempted to send ${error.event} without connection`)
+      break
+    default:
+      console.error('Unknown error:', error)
   }
-})
-
-// Validate message content
-iof.on('userData', (data, ack) => {
-  if (!isValidUserData(data)) {
-    return ack('Invalid data format')
-  }
-  // Process valid data...
 })
 ```
 
-## Browser Support
+## Message Queuing
 
-- Modern browsers with postMessage API support
-- Chrome 2+
-- Firefox 3+
-- Safari 4+
-- IE 8+
-- Edge (all versions)
+```javascript
+// Messages are automatically queued when disconnected
+iframeIO.emit('important-data', { data: 'This will be queued if disconnected' })
+
+// Clear queue manually if needed
+iframeIO.clearQueue()
+
+// Check queue status
+const stats = iframeIO.getStats()
+console.log(`${stats.queuedMessages} messages queued`)
+```
+
+## API Reference
+
+### New Methods
+
+#### Async Methods
+- **`emitAsync(event, payload?, timeout?)`** - Send message and wait for response (Promise)
+- **`connectAsync(timeout?)`** - Wait for connection with timeout (Promise)
+- **`onceAsync(event)`** - Wait for single event (Promise)
+
+#### Utility Methods
+- **`getStats()`** - Get connection statistics
+- **`clearQueue()`** - Clear queued messages
+
+### Connection Methods
+
+- **`initiate(contentWindow, iframeOrigin)`** - Establish connection (WINDOW peer only)
+- **`listen(hostOrigin?)`** - Listen for connection (IFRAME peer only)
+- **`disconnect(callback?)`** - Disconnect and cleanup
+- **`isConnected()`** - Check connection status
+
+### Messaging Methods
+
+- **`emit(event, payload?, callback?)`** - Send message
+- **`on(event, listener)`** - Add event listener
+- **`once(event, listener)`** - Add one-time event listener
+- **`off(event, listener?)`** - Remove event listener(s)
+- **`removeListeners(callback?)`** - Remove all listeners
+
+### Events
+
+#### Connection Events
+- **`connect`** - Connection established
+- **`disconnect`** - Connection lost with reason
+- **`reconnecting`** - Reconnection attempt started
+- **`reconnection_failed`** - All reconnection attempts failed
+
+#### Error Events
+- **`error`** - Various error conditions with detailed error objects
 
 ## TypeScript Support
 
-The library is written in TypeScript and includes full type definitions:
+Full TypeScript support with comprehensive type definitions:
 
 ```typescript
-import IOF, { Options, PeerType, AckFunction, Listener } from 'iframe.io'
+import IOF, { Options, Listener, AckFunction } from 'iframe.io'
 
 const options: Options = {
   type: 'WINDOW',
   debug: true,
-  heartbeatInterval: 15000
+  heartbeatInterval: 30000,
+  maxMessageSize: 512 * 1024
 }
 
-const iof = new IOF(options)
+const iframeIO = new IOF(options)
 
-// Type-safe event handling
-iof.on('myEvent', (data: { message: string }, ack?: AckFunction) => {
-  console.log(data.message)
-  ack?.(false, 'success')
+// Typed event listeners
+iframeIO.on('userAction', (data: { action: string; userId: number }) => {
+  console.log(`User ${data.userId} performed ${data.action}`)
 })
 
-// Type-safe async emissions
-const response = await iof.emitAsync<{ query: string }, { result: any }>('search', { 
-  query: 'typescript' 
-})
+// Typed async responses
+interface ApiResponse {
+  success: boolean
+  data: any[]
+}
+
+const response = await iframeIO.emitAsync<{ query: string }, ApiResponse>(
+  'search',
+  { query: 'hello' },
+  5000 // 5 second timeout
+)
 ```
+
+## Error Types Reference
+
+| Error Type | Description |
+|------------|-------------|
+| `INVALID_ORIGIN` | Message from unexpected origin |
+| `ORIGIN_MISMATCH` | Origin changed during session |
+| `MESSAGE_HANDLING_ERROR` | Error processing incoming message |
+| `EMIT_ERROR` | Error sending message |
+| `LISTENER_ERROR` | Error in event listener |
+| `RATE_LIMIT_EXCEEDED` | Too many messages sent |
+| `NO_CONNECTION` | Attempted to send without connection |
+
+## Browser Compatibility
+
+- Chrome 60+
+- Firefox 55+
+- Safari 12+
+- Edge 79+
+
+## Migration Guide
+
+### From v1.0.x to v1.1.0
+
+All existing code continues to work without changes. New features are additive:
+
+```javascript
+// Old way (still works)
+iframeIO.emit('getData', { id: 123 }, (error, result) => {
+  if (error) {
+    console.error('Error:', error)
+  } else {
+    console.log('Result:', result)
+  }
+})
+
+// New async way
+try {
+  const result = await iframeIO.emitAsync('getData', { id: 123 })
+  console.log('Result:', result)
+} catch (error) {
+  console.error('Error:', error.message)
+}
+```
+
+## Performance Considerations
+
+- **Message Size**: Keep messages under the configured `maxMessageSize` (default 1MB)
+- **Rate Limiting**: Respect the `maxMessagesPerSecond` limit (default 100/sec)
+- **Queue Size**: Monitor queued messages to avoid memory issues
+- **Heartbeat**: Adjust `heartbeatInterval` based on your reliability needs
 
 ## License
 
