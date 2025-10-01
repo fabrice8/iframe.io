@@ -89,8 +89,8 @@ export default class IOF {
   peer: Peer
   options: Options
   private messageListener?: ( event: MessageEvent ) => void
-  private heartbeatTimer?: NodeJS.Timeout
-  private reconnectTimer?: NodeJS.Timeout
+  private heartbeatTimer?: number
+  private reconnectTimer?: number
   private messageQueue: QueuedMessage[] = []
   private messageRateTracker: number[] = []
   private reconnectAttempts: number = 0
