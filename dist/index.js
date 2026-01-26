@@ -1,24 +1,4 @@
 "use strict";
-var __assign = (this && this.__assign) || function () {
-    __assign = Object.assign || function(t) {
-        for (var s, i = 1, n = arguments.length; i < n; i++) {
-            s = arguments[i];
-            for (var p in s) if (Object.prototype.hasOwnProperty.call(s, p))
-                t[p] = s[p];
-        }
-        return t;
-    };
-    return __assign.apply(this, arguments);
-};
-var __spreadArray = (this && this.__spreadArray) || function (to, from, pack) {
-    if (pack || arguments.length === 2) for (var i = 0, l = from.length, ar; i < l; i++) {
-        if (ar || !(i in from)) {
-            if (!ar) ar = Array.prototype.slice.call(from, 0, i);
-            ar[i] = from[i];
-        }
-    }
-    return to.concat(ar || Array.prototype.slice.call(from));
-};
 Object.defineProperty(exports, "__esModule", { value: true });
 function newObject(data) {
     return JSON.parse(JSON.stringify(data));
@@ -27,88 +7,107 @@ function getMessageSize(data) {
     try {
         return JSON.stringify(data).length;
     }
-    catch (_a) {
+    catch {
         return 0;
     }
 }
 function sanitizePayload(payload, maxSize) {
     if (!payload)
         return payload;
-    var size = getMessageSize(payload);
+    const size = getMessageSize(payload);
     if (size > maxSize)
-        throw new Error("Message size ".concat(size, " exceeds limit ").concat(maxSize));
+        throw new Error(`Message size ${size} exceeds limit ${maxSize}`);
     // Basic sanitization - remove functions and undefined values
     return JSON.parse(JSON.stringify(payload));
 }
-var ackId = function () {
-    var rmin = 100000, rmax = 999999, timestamp = Date.now(), random = Math.floor(Math.random() * (rmax - rmin + 1) + rmin);
-    return "".concat(timestamp, "_").concat(random);
+const ackId = () => {
+    // Prefer cryptographically strong randomness when available
+    try {
+        const globalCrypto = (typeof crypto !== 'undefined'
+            ? crypto
+            : (typeof window !== 'undefined' && window.crypto)
+                || (typeof globalThis !== 'undefined' && globalThis.crypto));
+        if (globalCrypto && typeof globalCrypto.getRandomValues === 'function') {
+            const buffer = new Uint32Array(4);
+            globalCrypto.getRandomValues(buffer);
+            const randomPart = Array.from(buffer).map(n => n.toString(16)).join('');
+            return `${Date.now()}_${randomPart}`;
+        }
+    }
+    catch {
+        // Fall back to Math.random-based implementation below
+    }
+    const rmin = 100000, rmax = 999999, timestampFallback = Date.now(), randomFallback = Math.floor(Math.random() * (rmax - rmin + 1) + rmin);
+    return `${timestampFallback}_${randomFallback}`;
 };
-var RESERVED_EVENTS = [
+const RESERVED_EVENTS = [
     'ping',
     'pong',
     '__heartbeat',
     '__heartbeat_response'
 ];
-var IOF = /** @class */ (function () {
-    function IOF(options) {
-        if (options === void 0) { options = {}; }
+class IOF {
+    constructor(options = {}) {
         this.messageQueue = [];
         this.messageRateTracker = [];
         this.reconnectAttempts = 0;
         this.maxReconnectAttempts = 5;
         if (options && typeof options !== 'object')
             throw new Error('Invalid Options');
-        this.options = __assign({ debug: false, heartbeatInterval: 30000, connectionTimeout: 10000, maxMessageSize: 1024 * 1024, maxMessagesPerSecond: 100, autoReconnect: true, messageQueueSize: 50 }, options);
+        this.options = {
+            debug: false,
+            heartbeatInterval: 30000,
+            connectionTimeout: 10000,
+            maxMessageSize: 1024 * 1024,
+            maxMessagesPerSecond: 100,
+            autoReconnect: true,
+            messageQueueSize: 50,
+            ...options
+        };
         this.Events = {};
         this.peer = { type: 'IFRAME', connected: false };
         if (options.type)
             this.peer.type = options.type.toUpperCase();
     }
-    IOF.prototype.debug = function () {
-        var args = [];
-        for (var _i = 0; _i < arguments.length; _i++) {
-            args[_i] = arguments[_i];
-        }
-        this.options.debug && console.debug.apply(console, args);
-    };
-    IOF.prototype.isConnected = function () {
+    debug(...args) {
+        this.options.debug && console.debug(...args);
+    }
+    isConnected() {
         return !!this.peer.connected && !!this.peer.source;
-    };
+    }
     // Enhanced connection health monitoring
-    IOF.prototype.startHeartbeat = function () {
-        var _this = this;
+    startHeartbeat() {
         if (!this.options.heartbeatInterval)
             return;
-        this.heartbeatTimer = setInterval(function () {
-            if (_this.isConnected()) {
-                var now = Date.now();
+        this.heartbeatTimer = setInterval(() => {
+            if (this.isConnected()) {
+                const now = Date.now();
                 // Check if peer is still responsive
-                if (_this.peer.lastHeartbeat
-                    && (now - _this.peer.lastHeartbeat) > (_this.options.heartbeatInterval * 2)) {
-                    _this.debug("[".concat(_this.peer.type, "] Heartbeat timeout detected"));
-                    _this.handleConnectionLoss();
+                if (this.peer.lastHeartbeat
+                    && (now - this.peer.lastHeartbeat) > (this.options.heartbeatInterval * 2)) {
+                    this.debug(`[${this.peer.type}] Heartbeat timeout detected`);
+                    this.handleConnectionLoss();
                     return;
                 }
                 // Send heartbeat
                 try {
-                    _this.emit('__heartbeat', { timestamp: now });
+                    this.emit('__heartbeat', { timestamp: now });
                 }
                 catch (error) {
-                    _this.debug("[".concat(_this.peer.type, "] Heartbeat send failed:"), error);
-                    _this.handleConnectionLoss();
+                    this.debug(`[${this.peer.type}] Heartbeat send failed:`, error);
+                    this.handleConnectionLoss();
                 }
             }
         }, this.options.heartbeatInterval);
-    };
-    IOF.prototype.stopHeartbeat = function () {
+    }
+    stopHeartbeat() {
         if (!this.heartbeatTimer)
             return;
         clearInterval(this.heartbeatTimer);
         this.heartbeatTimer = undefined;
-    };
+    }
     // Handle connection loss and potential reconnection
-    IOF.prototype.handleConnectionLoss = function () {
+    handleConnectionLoss() {
         if (!this.peer.connected)
             return;
         this.peer.connected = false;
@@ -117,40 +116,39 @@ var IOF = /** @class */ (function () {
         this.options.autoReconnect
             && this.reconnectAttempts < this.maxReconnectAttempts
             && this.attemptReconnection();
-    };
-    IOF.prototype.attemptReconnection = function () {
-        var _this = this;
+    }
+    attemptReconnection() {
         if (this.reconnectTimer)
             return;
         this.reconnectAttempts++;
-        var delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 30000); // Exponential backoff, max 30s
-        this.debug("[".concat(this.peer.type, "] Attempting reconnection ").concat(this.reconnectAttempts, "/").concat(this.maxReconnectAttempts, " in ").concat(delay, "ms"));
-        this.fire('reconnecting', { attempt: this.reconnectAttempts, delay: delay });
-        this.reconnectTimer = setTimeout(function () {
-            _this.reconnectTimer = undefined;
+        const delay = Math.min(1000 * Math.pow(2, this.reconnectAttempts - 1), 30000); // Exponential backoff, max 30s
+        this.debug(`[${this.peer.type}] Attempting reconnection ${this.reconnectAttempts}/${this.maxReconnectAttempts} in ${delay}ms`);
+        this.fire('reconnecting', { attempt: this.reconnectAttempts, delay });
+        this.reconnectTimer = setTimeout(() => {
+            this.reconnectTimer = undefined;
             // Re-initiate connection for WINDOW type
-            _this.peer.type === 'WINDOW'
-                && _this.peer.source
-                && _this.peer.origin
-                && _this.emit('ping');
+            this.peer.type === 'WINDOW'
+                && this.peer.source
+                && this.peer.origin
+                && this.emit('ping');
             // For IFRAME type, just wait for incoming connection
             // Set timeout for this reconnection attempt
-            setTimeout(function () {
-                if (_this.peer.connected)
+            setTimeout(() => {
+                if (this.peer.connected)
                     return;
-                _this.reconnectAttempts < _this.maxReconnectAttempts
-                    ? _this.attemptReconnection()
-                    : _this.fire('reconnection_failed', { attempts: _this.reconnectAttempts });
-            }, _this.options.connectionTimeout);
+                this.reconnectAttempts < this.maxReconnectAttempts
+                    ? this.attemptReconnection()
+                    : this.fire('reconnection_failed', { attempts: this.reconnectAttempts });
+            }, this.options.connectionTimeout);
         }, delay);
-    };
+    }
     // Message rate limiting
-    IOF.prototype.checkRateLimit = function () {
+    checkRateLimit() {
         if (!this.options.maxMessagesPerSecond)
             return true;
-        var now = Date.now(), aSecondAgo = now - 1000;
+        const now = Date.now(), aSecondAgo = now - 1000;
         // Clean old entries
-        this.messageRateTracker = this.messageRateTracker.filter(function (timestamp) { return timestamp > aSecondAgo; });
+        this.messageRateTracker = this.messageRateTracker.filter(timestamp => timestamp > aSecondAgo);
         // Check if limit exceeded
         if (this.messageRateTracker.length >= this.options.maxMessagesPerSecond) {
             this.fire('error', {
@@ -162,45 +160,43 @@ var IOF = /** @class */ (function () {
         }
         this.messageRateTracker.push(now);
         return true;
-    };
+    }
     // Queue messages when not connected
-    IOF.prototype.queueMessage = function (_event, payload, fn) {
+    queueMessage(_event, payload, fn) {
         if (this.messageQueue.length >= this.options.messageQueueSize) {
             // Remove oldest message
-            var removed = this.messageQueue.shift();
-            this.debug("[".concat(this.peer.type, "] Message queue full, removed oldest message:"), removed === null || removed === void 0 ? void 0 : removed._event);
+            const removed = this.messageQueue.shift();
+            this.debug(`[${this.peer.type}] Message queue full, removed oldest message:`, removed?._event);
         }
         this.messageQueue.push({
-            _event: _event,
-            payload: payload,
-            fn: fn,
+            _event,
+            payload,
+            fn,
             timestamp: Date.now()
         });
-        this.debug("[".concat(this.peer.type, "] Queued message: ").concat(_event, " (queue size: ").concat(this.messageQueue.length, ")"));
-    };
+        this.debug(`[${this.peer.type}] Queued message: ${_event} (queue size: ${this.messageQueue.length})`);
+    }
     // Process queued messages when connection is established
-    IOF.prototype.processMessageQueue = function () {
-        var _this = this;
+    processMessageQueue() {
         if (!this.isConnected() || this.messageQueue.length === 0)
             return;
-        this.debug("[".concat(this.peer.type, "] Processing ").concat(this.messageQueue.length, " queued messages"));
-        var queue = __spreadArray([], this.messageQueue, true);
+        this.debug(`[${this.peer.type}] Processing ${this.messageQueue.length} queued messages`);
+        const queue = [...this.messageQueue];
         this.messageQueue = [];
-        queue.forEach(function (message) {
+        queue.forEach(message => {
             try {
-                _this.emit(message._event, message.payload, message.fn);
+                this.emit(message._event, message.payload, message.fn);
             }
             catch (error) {
-                _this.debug("[".concat(_this.peer.type, "] Failed to send queued message:"), error);
+                this.debug(`[${this.peer.type}] Failed to send queued message:`, error);
             }
         });
-    };
+    }
     /**
      * Establish a connection with an iframe containing
      * in the current window
      */
-    IOF.prototype.initiate = function (contentWindow, iframeOrigin) {
-        var _this = this;
+    initiate(contentWindow, iframeOrigin) {
         if (!contentWindow || !iframeOrigin)
             throw new Error('Invalid Connection initiation arguments');
         if (this.peer.type === 'IFRAME')
@@ -211,74 +207,94 @@ var IOF = /** @class */ (function () {
         this.peer.origin = iframeOrigin;
         this.peer.connected = false;
         this.reconnectAttempts = 0;
-        this.messageListener = function (_a) {
-            var origin = _a.origin, data = _a.data, source = _a.source;
+        this.messageListener = ({ origin, data, source }) => {
             try {
                 // Enhanced security: check valid message structure
-                if (origin !== _this.peer.origin
+                if (origin !== this.peer.origin
                     || !source
                     || typeof data !== 'object'
                     || !data.hasOwnProperty('_event'))
                     return;
-                var _b = data, _event = _b._event, payload = _b.payload, cid = _b.cid, timestamp = _b.timestamp;
+                const { _event, payload, cid, timestamp } = data;
                 // Handle heartbeat responses
                 if (_event === '__heartbeat_response') {
-                    _this.peer.lastHeartbeat = Date.now();
+                    this.peer.lastHeartbeat = Date.now();
                     return;
                 }
                 // Handle heartbeat requests
                 if (_event === '__heartbeat') {
-                    _this.emit('__heartbeat_response', { timestamp: Date.now() });
-                    _this.peer.lastHeartbeat = Date.now();
+                    this.emit('__heartbeat_response', { timestamp: Date.now() });
+                    this.peer.lastHeartbeat = Date.now();
                     return;
                 }
-                _this.debug("[".concat(_this.peer.type, "] Message: ").concat(_event), payload || '');
+                this.debug(`[${this.peer.type}] Message: ${_event}`, payload || '');
                 // Handshake or availability check events
                 if (_event == 'pong') {
                     // Content Window is connected to iframe
-                    _this.peer.connected = true;
-                    _this.reconnectAttempts = 0;
-                    _this.peer.lastHeartbeat = Date.now();
-                    _this.startHeartbeat();
-                    _this.fire('connect');
-                    _this.processMessageQueue();
-                    _this.debug("[".concat(_this.peer.type, "] connected"));
+                    this.peer.connected = true;
+                    this.reconnectAttempts = 0;
+                    this.peer.lastHeartbeat = Date.now();
+                    this.startHeartbeat();
+                    this.fire('connect');
+                    this.processMessageQueue();
+                    this.debug(`[${this.peer.type}] connected`);
                     return;
                 }
+                // Optional application-level incoming validation (non-reserved events only)
+                if (!RESERVED_EVENTS.includes(_event)) {
+                    if (this.options.allowedIncomingEvents
+                        && !this.options.allowedIncomingEvents.includes(_event)) {
+                        this.fire('error', {
+                            type: 'DISALLOWED_EVENT',
+                            direction: 'incoming',
+                            event: _event,
+                            origin
+                        });
+                        return;
+                    }
+                    if (this.options.validateIncoming
+                        && !this.options.validateIncoming(_event, payload, origin)) {
+                        this.fire('error', {
+                            type: 'INVALID_MESSAGE',
+                            direction: 'incoming',
+                            event: _event,
+                            origin
+                        });
+                        return;
+                    }
+                }
                 // Fire available event listeners
-                _this.fire(_event, payload, cid);
+                this.fire(_event, payload, cid);
             }
             catch (error) {
-                _this.debug("[".concat(_this.peer.type, "] Message handling error:"), error);
-                _this.fire('error', {
+                this.debug(`[${this.peer.type}] Message handling error:`, error);
+                this.fire('error', {
                     type: 'MESSAGE_HANDLING_ERROR',
                     error: error instanceof Error ? error.message : String(error),
-                    origin: origin
+                    origin
                 });
             }
         };
         window.addEventListener('message', this.messageListener, false);
-        this.debug("[".concat(this.peer.type, "] Initiate connection: IFrame origin <").concat(iframeOrigin, ">"));
+        this.debug(`[${this.peer.type}] Initiate connection: IFrame origin <${iframeOrigin}>`);
         this.emit('ping');
         return this;
-    };
+    }
     /**
      * Listening to connection from the content window
      */
-    IOF.prototype.listen = function (hostOrigin) {
-        var _this = this;
+    listen(hostOrigin) {
         this.peer.type = 'IFRAME'; // iframe.io connection listener is automatically set as IFRAME
         this.peer.connected = false;
         this.reconnectAttempts = 0;
-        this.debug("[".concat(this.peer.type, "] Listening to connect").concat(hostOrigin ? ": Host <".concat(hostOrigin, ">") : ''));
+        this.debug(`[${this.peer.type}] Listening to connect${hostOrigin ? `: Host <${hostOrigin}>` : ''}`);
         // Clean up existing listener if any
         this.cleanup();
-        this.messageListener = function (_a) {
-            var origin = _a.origin, data = _a.data, source = _a.source;
+        this.messageListener = ({ origin, data, source }) => {
             try {
                 // Enhanced security: check host origin where event must only come from
                 if (hostOrigin && hostOrigin !== origin) {
-                    _this.fire('error', {
+                    this.fire('error', {
                         type: 'INVALID_ORIGIN',
                         expected: hostOrigin,
                         received: origin
@@ -291,78 +307,73 @@ var IOF = /** @class */ (function () {
                     || !data.hasOwnProperty('_event'))
                     return;
                 // Define peer source window and origin
-                if (!_this.peer.source) {
-                    _this.peer = __assign(__assign({}, _this.peer), { source: source, origin: origin });
-                    _this.debug("[".concat(_this.peer.type, "] Connect to ").concat(origin));
+                if (!this.peer.source) {
+                    this.peer = { ...this.peer, source: source, origin };
+                    this.debug(`[${this.peer.type}] Connect to ${origin}`);
                 }
                 // Origin different from handshaked source origin
-                else if (origin !== _this.peer.origin) {
-                    _this.fire('error', {
+                else if (origin !== this.peer.origin) {
+                    this.fire('error', {
                         type: 'ORIGIN_MISMATCH',
-                        expected: _this.peer.origin,
+                        expected: this.peer.origin,
                         received: origin
                     });
                     return;
                 }
-                var _event = data._event, payload = data.payload, cid = data.cid, timestamp = data.timestamp;
+                const { _event, payload, cid, timestamp } = data;
                 // Handle heartbeat responses
                 if (_event === '__heartbeat_response') {
-                    _this.peer.lastHeartbeat = Date.now();
+                    this.peer.lastHeartbeat = Date.now();
                     return;
                 }
                 // Handle heartbeat requests
                 if (_event === '__heartbeat') {
-                    _this.emit('__heartbeat_response', { timestamp: Date.now() });
-                    _this.peer.lastHeartbeat = Date.now();
+                    this.emit('__heartbeat_response', { timestamp: Date.now() });
+                    this.peer.lastHeartbeat = Date.now();
                     return;
                 }
-                _this.debug("[".concat(_this.peer.type, "] Message: ").concat(_event), payload || '');
+                this.debug(`[${this.peer.type}] Message: ${_event}`, payload || '');
                 // Handshake or availability check events
                 if (_event == 'ping') {
-                    _this.emit('pong');
+                    this.emit('pong');
                     // Iframe is connected to content window
-                    _this.peer.connected = true;
-                    _this.reconnectAttempts = 0;
-                    _this.peer.lastHeartbeat = Date.now();
-                    _this.startHeartbeat();
-                    _this.fire('connect');
-                    _this.processMessageQueue();
-                    _this.debug("[".concat(_this.peer.type, "] connected"));
+                    this.peer.connected = true;
+                    this.reconnectAttempts = 0;
+                    this.peer.lastHeartbeat = Date.now();
+                    this.startHeartbeat();
+                    this.fire('connect');
+                    this.processMessageQueue();
+                    this.debug(`[${this.peer.type}] connected`);
                     return;
                 }
                 // Fire available event listeners
-                _this.fire(_event, payload, cid);
+                this.fire(_event, payload, cid);
             }
             catch (error) {
-                _this.debug("[".concat(_this.peer.type, "] Message handling error:"), error);
-                _this.fire('error', {
+                this.debug(`[${this.peer.type}] Message handling error:`, error);
+                this.fire('error', {
                     type: 'MESSAGE_HANDLING_ERROR',
                     error: error instanceof Error ? error.message : String(error),
-                    origin: origin
+                    origin
                 });
             }
         };
         window.addEventListener('message', this.messageListener, false);
         return this;
-    };
-    IOF.prototype.fire = function (_event, payload, cid) {
-        var _this = this;
+    }
+    fire(_event, payload, cid) {
         // Volatile event - check if any listeners exist
         if (!this.Events[_event] && !this.Events[_event + '--@once']) {
-            this.debug("[".concat(this.peer.type, "] No <").concat(_event, "> listener defined"));
+            this.debug(`[${this.peer.type}] No <${_event}> listener defined`);
             return;
         }
-        var ackFn = cid
-            ? function (error) {
-                var args = [];
-                for (var _i = 1; _i < arguments.length; _i++) {
-                    args[_i - 1] = arguments[_i];
-                }
-                _this.emit("".concat(_event, "--").concat(cid, "--@ack"), { error: error || false, args: args });
+        const ackFn = cid
+            ? (error, ...args) => {
+                this.emit(`${_event}--${cid}--@ack`, { error: error || false, args });
                 return;
             }
             : undefined;
-        var listeners = [];
+        let listeners = [];
         if (this.Events[_event + '--@once']) {
             // Once triggable event
             _event += '--@once';
@@ -373,21 +384,21 @@ var IOF = /** @class */ (function () {
         else
             listeners = this.Events[_event];
         // Fire listeners with error handling
-        listeners.forEach(function (fn) {
+        listeners.forEach(fn => {
             try {
                 payload !== undefined ? fn(payload, ackFn) : fn(ackFn);
             }
             catch (error) {
-                _this.debug("[".concat(_this.peer.type, "] Listener error for ").concat(_event, ":"), error);
-                _this.fire('error', {
+                this.debug(`[${this.peer.type}] Listener error for ${_event}:`, error);
+                this.fire('error', {
                     type: 'LISTENER_ERROR',
                     event: _event,
                     error: error instanceof Error ? error.message : String(error)
                 });
             }
         });
-    };
-    IOF.prototype.emit = function (_event, payload, fn) {
+    }
+    emit(_event, payload, fn) {
         // Check rate limiting
         if (!this.checkRateLimit())
             return this;
@@ -409,30 +420,27 @@ var IOF = /** @class */ (function () {
         }
         try {
             // Enhanced security: sanitize and validate payload
-            var sanitizedPayload = payload
+            const sanitizedPayload = payload
                 ? sanitizePayload(payload, this.options.maxMessageSize)
                 : payload;
             // Acknowledge event listener
-            var cid = void 0;
+            let cid;
             if (typeof fn === 'function') {
-                var ackFunction_1 = fn;
+                const ackFunction = fn;
                 cid = ackId();
-                this.once("".concat(_event, "--").concat(cid, "--@ack"), function (_a) {
-                    var error = _a.error, args = _a.args;
-                    return ackFunction_1.apply(void 0, __spreadArray([error], args, false));
-                });
+                this.once(`${_event}--${cid}--@ack`, ({ error, args }) => ackFunction(error, ...args));
             }
-            var messageData = {
-                _event: _event,
+            const messageData = {
+                _event,
                 payload: sanitizedPayload,
-                cid: cid,
+                cid,
                 timestamp: Date.now(),
                 size: getMessageSize(sanitizedPayload)
             };
             this.peer.source.postMessage(newObject(messageData), this.peer.origin);
         }
         catch (error) {
-            this.debug("[".concat(this.peer.type, "] Emit error:"), error);
+            this.debug(`[${this.peer.type}] Emit error:`, error);
             this.fire('error', {
                 type: 'EMIT_ERROR',
                 event: _event,
@@ -443,29 +451,29 @@ var IOF = /** @class */ (function () {
                 && fn(error instanceof Error ? error.message : String(error));
         }
         return this;
-    };
-    IOF.prototype.on = function (_event, fn) {
+    }
+    on(_event, fn) {
         // Add Event listener
         if (!this.Events[_event])
             this.Events[_event] = [];
         this.Events[_event].push(fn);
-        this.debug("[".concat(this.peer.type, "] New <").concat(_event, "> listener on"));
+        this.debug(`[${this.peer.type}] New <${_event}> listener on`);
         return this;
-    };
-    IOF.prototype.once = function (_event, fn) {
+    }
+    once(_event, fn) {
         // Add Once Event listener
         _event += '--@once';
         if (!this.Events[_event])
             this.Events[_event] = [];
         this.Events[_event].push(fn);
-        this.debug("[".concat(this.peer.type, "] New <").concat(_event, " once> listener on"));
+        this.debug(`[${this.peer.type}] New <${_event} once> listener on`);
         return this;
-    };
-    IOF.prototype.off = function (_event, fn) {
+    }
+    off(_event, fn) {
         // Remove Event listener
         if (fn && this.Events[_event]) {
             // Remove specific listener if provided
-            var index = this.Events[_event].indexOf(fn);
+            const index = this.Events[_event].indexOf(fn);
             if (index > -1) {
                 this.Events[_event].splice(index, 1);
                 // Remove event array if empty
@@ -477,29 +485,23 @@ var IOF = /** @class */ (function () {
         else
             delete this.Events[_event];
         typeof fn == 'function' && fn();
-        this.debug("[".concat(this.peer.type, "] <").concat(_event, "> listener off"));
+        this.debug(`[${this.peer.type}] <${_event}> listener off`);
         return this;
-    };
-    IOF.prototype.removeListeners = function (fn) {
+    }
+    removeListeners(fn) {
         // Clear all event listeners
         this.Events = {};
         typeof fn == 'function' && fn();
-        this.debug("[".concat(this.peer.type, "] All listeners removed"));
+        this.debug(`[${this.peer.type}] All listeners removed`);
         return this;
-    };
-    IOF.prototype.emitAsync = function (_event, payload, timeout) {
-        var _this = this;
-        if (timeout === void 0) { timeout = 5000; }
-        return new Promise(function (resolve, reject) {
-            var timeoutId = setTimeout(function () {
-                reject(new Error("Event '".concat(_event, "' acknowledgment timeout after ").concat(timeout, "ms")));
+    }
+    emitAsync(_event, payload, timeout = 5000) {
+        return new Promise((resolve, reject) => {
+            const timeoutId = setTimeout(() => {
+                reject(new Error(`Event '${_event}' acknowledgment timeout after ${timeout}ms`));
             }, timeout);
             try {
-                _this.emit(_event, payload, function (error) {
-                    var args = [];
-                    for (var _i = 1; _i < arguments.length; _i++) {
-                        args[_i - 1] = arguments[_i];
-                    }
+                this.emit(_event, payload, (error, ...args) => {
                     clearTimeout(timeoutId);
                     error
                         ? reject(new Error(typeof error === 'string' ? error : 'Ack error'))
@@ -511,29 +513,27 @@ var IOF = /** @class */ (function () {
                 reject(error);
             }
         });
-    };
-    IOF.prototype.onceAsync = function (_event) {
-        var _this = this;
-        return new Promise(function (resolve) { return _this.once(_event, resolve); });
-    };
-    IOF.prototype.connectAsync = function (timeout) {
-        var _this = this;
-        return new Promise(function (resolve, reject) {
-            if (_this.isConnected())
+    }
+    onceAsync(_event) {
+        return new Promise(resolve => this.once(_event, resolve));
+    }
+    connectAsync(timeout) {
+        return new Promise((resolve, reject) => {
+            if (this.isConnected())
                 return resolve();
-            var timeoutId = setTimeout(function () {
-                _this.off('connect', connectHandler);
+            const timeoutId = setTimeout(() => {
+                this.off('connect', connectHandler);
                 reject(new Error('Connection timeout'));
-            }, timeout || _this.options.connectionTimeout);
-            var connectHandler = function () {
+            }, timeout || this.options.connectionTimeout);
+            const connectHandler = () => {
                 clearTimeout(timeoutId);
                 resolve();
             };
-            _this.once('connect', connectHandler);
+            this.once('connect', connectHandler);
         });
-    };
+    }
     // Clean up all resources
-    IOF.prototype.cleanup = function () {
+    cleanup() {
         if (this.messageListener) {
             window.removeEventListener('message', this.messageListener);
             this.messageListener = undefined;
@@ -543,8 +543,8 @@ var IOF = /** @class */ (function () {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = undefined;
         }
-    };
-    IOF.prototype.disconnect = function (fn) {
+    }
+    disconnect(fn) {
         // Cleanup on disconnect
         this.cleanup();
         this.peer.connected = false;
@@ -556,11 +556,11 @@ var IOF = /** @class */ (function () {
         this.reconnectAttempts = 0;
         this.removeListeners();
         typeof fn == 'function' && fn();
-        this.debug("[".concat(this.peer.type, "] Disconnected"));
+        this.debug(`[${this.peer.type}] Disconnected`);
         return this;
-    };
+    }
     // Get connection statistics
-    IOF.prototype.getStats = function () {
+    getStats() {
         return {
             connected: this.isConnected(),
             peerType: this.peer.type,
@@ -571,14 +571,13 @@ var IOF = /** @class */ (function () {
             activeListeners: Object.keys(this.Events).length,
             messageRate: this.messageRateTracker.length
         };
-    };
+    }
     // Clear message queue manually
-    IOF.prototype.clearQueue = function () {
-        var queueSize = this.messageQueue.length;
+    clearQueue() {
+        const queueSize = this.messageQueue.length;
         this.messageQueue = [];
-        this.debug("[".concat(this.peer.type, "] Cleared ").concat(queueSize, " queued messages"));
+        this.debug(`[${this.peer.type}] Cleared ${queueSize} queued messages`);
         return this;
-    };
-    return IOF;
-}());
+    }
+}
 exports.default = IOF;
