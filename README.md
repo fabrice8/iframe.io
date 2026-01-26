@@ -91,7 +91,11 @@ const iframeIO = new IOF({
   autoReconnect: true,               // Enable automatic reconnection
   messageQueueSize: 50,              // Max queued messages when disconnected
   allowedIncomingEvents: ['hello', 'response'], // Optional incoming event allowlist (non-reserved events)
-  validateIncoming: (event, payload, origin) => true // Optional custom incoming validator
+  validateIncoming: (event, payload, origin) => true, // Optional custom incoming validator
+  cryptoAuth: {                       // Optional cryptographic message authentication (HMAC-SHA256)
+    secret: 'replace-with-shared-secret',
+    requireSigned: false
+  }
 })
 ```
 
@@ -235,6 +239,26 @@ iframeIO.on('error', (error) => {
 })
 ```
 
+### Cryptographic Message Authentication (HMAC)
+
+If you need **message integrity/authenticity** beyond origin checks, enable `cryptoAuth` and use the signed APIs. This adds an HMAC-SHA256 signature + timestamp + nonce (with basic replay protection).
+
+**Important security note:** if the Web page/iframe can execute untrusted JS, that JS can read the shared secret. This protects against accidental/misrouted messages and some injection scenarios—not a sandbox boundary.
+
+```javascript
+const iframeIO = new IOF({
+  type: 'WINDOW',
+  cryptoAuth: {
+    secret: 'replace-with-shared-secret',
+    requireSigned: true // drop any unsigned/invalid messages
+  }
+})
+
+// Send signed
+await iframeIO.emitSigned('hello', { msg: 'signed' })
+const reply = await iframeIO.emitAsyncSigned('getData', { id: 123 }, 5000)
+```
+
 ## Comprehensive Error Handling
 
 ```javascript
@@ -365,6 +389,8 @@ const response = await iframeIO.emitAsync<{ query: string }, ApiResponse>(
 | `LISTENER_ERROR` | Error in event listener |
 | `DISALLOWED_EVENT` | Incoming event rejected by `allowedIncomingEvents` |
 | `INVALID_MESSAGE` | Incoming message rejected by `validateIncoming` |
+| `AUTH_FAILED` | Incoming message failed cryptographic authentication |
+| `AUTH_ERROR` | Cryptographic verification errored (missing crypto, etc.) |
 | `RATE_LIMIT_EXCEEDED` | Too many messages sent |
 | `NO_CONNECTION` | Attempted to send without connection |
 

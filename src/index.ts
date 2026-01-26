@@ -3,6 +3,31 @@ export type PeerType = 'WINDOW' | 'IFRAME'
 export type AckFunction = ( error: boolean | string, ...args: any[] ) => void
 export type Listener = ( payload?: any, ack?: AckFunction ) => void
 
+export type CryptoAuthOptions = {
+  /**
+   * Shared secret used for HMAC-SHA256 signing.
+   *
+   * IMPORTANT: If an attacker can execute JS in either peer, they can read the secret.
+   * This is for authenticity/integrity between cooperating peers, not a sandbox boundary.
+   */
+  secret: string
+  /**
+   * If true, drop any incoming message that doesn't carry valid auth.
+   * Default: false (accept unsigned messages)
+   */
+  requireSigned?: boolean
+  /**
+   * Maximum allowed clock skew for signed messages (ms).
+   * Default: 2 minutes
+   */
+  maxSkewMs?: number
+  /**
+   * Replay window size (max number of nonces kept in memory).
+   * Default: 500
+   */
+  replayWindowSize?: number
+}
+
 export type Options = {
   type?: PeerType
   debug?: boolean
@@ -22,6 +47,11 @@ export type Options = {
    * Return false to drop a message; an 'error' event will be emitted.
    */
   validateIncoming?: ( event: string, payload: any, origin: string ) => boolean
+  /**
+   * Optional cryptographic message authentication (HMAC-SHA256).
+   * When enabled, use `emitSigned` / `emitAsyncSigned` to send signed messages.
+   */
+  cryptoAuth?: CryptoAuthOptions
 }
 
 export interface RegisteredEvents {
@@ -42,6 +72,12 @@ export type MessageData = {
   cid: string | undefined
   timestamp?: number
   size?: number
+  auth?: {
+    alg: 'HMAC-SHA256'
+    ts: number
+    nonce: string
+    sig: string
+  }
 }
 
 export type Message = {
@@ -77,13 +113,80 @@ function sanitizePayload( payload: any, maxSize: number ): any {
   return JSON.parse( JSON.stringify( payload ) )
 }
 
+function constantTimeEqual( a: string, b: string ): boolean {
+  if( a.length !== b.length ) return false
+  let out = 0
+  for( let i = 0; i < a.length; i++ ) out |= a.charCodeAt( i ) ^ b.charCodeAt( i )
+  return out === 0
+}
+
+function getGlobalCrypto(){
+  return (typeof crypto !== 'undefined'
+    ? crypto
+    : (typeof window !== 'undefined' && (window as any).crypto)
+      || (typeof globalThis !== 'undefined' && (globalThis as any).crypto))
+}
+
+function randomHex( bytes: number ): string {
+  try {
+    const globalCrypto = getGlobalCrypto()
+    if( globalCrypto && typeof globalCrypto.getRandomValues === 'function' ){
+      const buf = new Uint8Array( bytes )
+      globalCrypto.getRandomValues( buf )
+      return Array.from( buf ).map( b => b.toString( 16 ).padStart( 2, '0' ) ).join('')
+    }
+  }
+  catch{}
+
+  // Fallback (NOT cryptographically strong)
+  return Array.from({ length: bytes }, () => Math.floor( Math.random() * 256 ).toString( 16 ).padStart( 2, '0' ) ).join('')
+}
+
+async function hmacSha256Base64Url( secret: string, message: string ): Promise<string> {
+  // Browser/WebCrypto
+  try {
+    const globalCrypto = getGlobalCrypto() as any
+    const subtle = globalCrypto?.subtle
+    if( subtle && typeof subtle.importKey === 'function' ){
+      const enc = new TextEncoder()
+      const key = await subtle.importKey(
+        'raw',
+        enc.encode( secret ),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign']
+      )
+      const sig = await subtle.sign( 'HMAC', key, enc.encode( message ) )
+      const bytes = new Uint8Array( sig )
+      const b64 = btoa( String.fromCharCode( ...bytes ) )
+      return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+    }
+  }
+  catch{
+    // fallthrough to Node implementation
+  }
+
+  // Node.js (commonjs) - optional
+  try {
+    const nodeCrypto = (globalThis as any).__iof_node_crypto
+      || ((globalThis as any).__iof_node_crypto = (typeof (globalThis as any).require === 'function'
+        ? (globalThis as any).require('crypto')
+        : undefined))
+
+    if( !nodeCrypto ) throw new Error('node crypto unavailable')
+
+    const b64 = nodeCrypto.createHmac('sha256', secret).update( message ).digest('base64')
+    return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+  }
+  catch{
+    throw new Error('No crypto implementation available for HMAC-SHA256')
+  }
+}
+
 const ackId = () => {
   // Prefer cryptographically strong randomness when available
   try {
-    const globalCrypto = (typeof crypto !== 'undefined'
-      ? crypto
-      : (typeof window !== 'undefined' && (window as any).crypto)
-        || (typeof globalThis !== 'undefined' && (globalThis as any).crypto))
+    const globalCrypto = getGlobalCrypto()
 
     if( globalCrypto && typeof globalCrypto.getRandomValues === 'function' ){
       const buffer = new Uint32Array(4)
@@ -124,6 +227,7 @@ export default class IOF {
   private messageRateTracker: number[] = []
   private reconnectAttempts: number = 0
   private maxReconnectAttempts: number = 5
+  private seenNonces: Map<string, number> = new Map()
 
   constructor( options: Options = {} ){
     if( options && typeof options !== 'object' )
@@ -144,6 +248,82 @@ export default class IOF {
 
     if( options.type )
       this.peer.type = options.type.toUpperCase() as PeerType
+  }
+
+  private cryptoCfg(){
+    if( !this.options.cryptoAuth ) return undefined
+    return {
+      secret: this.options.cryptoAuth.secret,
+      requireSigned: !!this.options.cryptoAuth.requireSigned,
+      maxSkewMs: this.options.cryptoAuth.maxSkewMs ?? 2 * 60 * 1000,
+      replayWindowSize: this.options.cryptoAuth.replayWindowSize ?? 500
+    }
+  }
+
+  private pruneNonces( maxSize: number ){
+    if( this.seenNonces.size <= maxSize ) return
+    // Remove oldest inserted entries
+    const toRemove = this.seenNonces.size - maxSize
+    let i = 0
+    for( const key of this.seenNonces.keys() ){
+      this.seenNonces.delete( key )
+      i++
+      if( i >= toRemove ) break
+    }
+  }
+
+  private async signOutgoing( messageData: Omit<MessageData, 'auth'> ): Promise<MessageData['auth']> {
+    const cfg = this.cryptoCfg()
+    if( !cfg ) return undefined
+
+    const ts = Date.now()
+    const nonce = randomHex( 16 )
+    const canonical = JSON.stringify({
+      _event: messageData._event,
+      payload: messageData.payload,
+      cid: messageData.cid,
+      timestamp: messageData.timestamp,
+      size: messageData.size,
+      ts,
+      nonce
+    })
+    const sig = await hmacSha256Base64Url( cfg.secret, canonical )
+
+    return { alg: 'HMAC-SHA256', ts, nonce, sig }
+  }
+
+  private async verifyIncomingAuth( data: MessageData, origin: string ): Promise<boolean> {
+    const cfg = this.cryptoCfg()
+    if( !cfg ) return true
+
+    if( !data.auth ){
+      return !cfg.requireSigned
+    }
+
+    const { alg, ts, nonce, sig } = data.auth
+    if( alg !== 'HMAC-SHA256' ) return false
+    if( typeof ts !== 'number' || typeof nonce !== 'string' || typeof sig !== 'string' ) return false
+
+    const now = Date.now()
+    if( Math.abs( now - ts ) > cfg.maxSkewMs ) return false
+
+    // Replay protection
+    if( this.seenNonces.has( nonce ) ) return false
+    this.seenNonces.set( nonce, ts )
+    this.pruneNonces( cfg.replayWindowSize )
+
+    const canonical = JSON.stringify({
+      _event: data._event,
+      payload: data.payload,
+      cid: data.cid,
+      timestamp: data.timestamp,
+      size: data.size,
+      ts,
+      nonce
+    })
+    const expected = await hmacSha256Base64Url( cfg.secret, canonical )
+
+    return constantTimeEqual( expected, sig )
   }
 
   debug( ...args: any[] ){
@@ -350,6 +530,46 @@ export default class IOF {
           return
         }
 
+        // Cryptographic authentication (optional)
+        if( this.options.cryptoAuth ){
+          this.verifyIncomingAuth( data as MessageData, origin )
+            .then( ok => {
+              if( !ok ){
+                this.fire('error', { type: 'AUTH_FAILED', origin, event: _event })
+                return
+              }
+
+              // Optional application-level incoming validation (non-reserved events only)
+              if( !RESERVED_EVENTS.includes( _event ) ){
+                if( this.options.allowedIncomingEvents
+                    && !this.options.allowedIncomingEvents.includes( _event ) ){
+                  this.fire('error', {
+                    type: 'DISALLOWED_EVENT',
+                    direction: 'incoming',
+                    event: _event,
+                    origin
+                  })
+                  return
+                }
+
+                if( this.options.validateIncoming
+                    && !this.options.validateIncoming( _event, payload, origin ) ){
+                  this.fire('error', {
+                    type: 'INVALID_MESSAGE',
+                    direction: 'incoming',
+                    event: _event,
+                    origin
+                  })
+                  return
+                }
+              }
+
+              this.fire( _event, payload, cid )
+            })
+            .catch( error => this.fire('error', { type: 'AUTH_ERROR', origin, event: _event, error: String(error) }) )
+          return
+        }
+
         // Optional application-level incoming validation (non-reserved events only)
         if( !RESERVED_EVENTS.includes( _event ) ){
           if( this.options.allowedIncomingEvents
@@ -475,6 +695,46 @@ export default class IOF {
           return
         }
 
+        // Cryptographic authentication (optional)
+        if( this.options.cryptoAuth ){
+          this.verifyIncomingAuth( data as MessageData, origin )
+            .then( ok => {
+              if( !ok ){
+                this.fire('error', { type: 'AUTH_FAILED', origin, event: _event })
+                return
+              }
+
+              // Optional application-level incoming validation (non-reserved events only)
+              if( !RESERVED_EVENTS.includes( _event ) ){
+                if( this.options.allowedIncomingEvents
+                    && !this.options.allowedIncomingEvents.includes( _event ) ){
+                  this.fire('error', {
+                    type: 'DISALLOWED_EVENT',
+                    direction: 'incoming',
+                    event: _event,
+                    origin
+                  })
+                  return
+                }
+
+                if( this.options.validateIncoming
+                    && !this.options.validateIncoming( _event, payload, origin ) ){
+                  this.fire('error', {
+                    type: 'INVALID_MESSAGE',
+                    direction: 'incoming',
+                    event: _event,
+                    origin
+                  })
+                  return
+                }
+              }
+
+              this.fire( _event, payload, cid )
+            })
+            .catch( error => this.fire('error', { type: 'AUTH_ERROR', origin, event: _event, error: String(error) }) )
+          return
+        }
+
         // Fire available event listeners
         this.fire( _event, payload, cid )
       }
@@ -593,6 +853,90 @@ export default class IOF {
     }
 
     return this
+  }
+
+  /**
+   * Send a signed message (HMAC-SHA256) when `options.cryptoAuth` is configured.
+   * This is async because WebCrypto signing is async.
+   */
+  async emitSigned<T = any>( _event: string, payload?: T | AckFunction, fn?: AckFunction ): Promise<this> {
+    // Check rate limiting
+    if( !this.checkRateLimit() ) return this
+
+    if( !this.options.cryptoAuth ){
+      // If auth not enabled, fall back to normal emit behavior
+      this.emit( _event as any, payload as any, fn )
+      return this
+    }
+
+    if( !this.isConnected() && !RESERVED_EVENTS.includes(_event) ){
+      this.queueMessage( _event, payload, fn )
+      return this
+    }
+
+    if( !this.peer.source ){
+      this.fire('error', { type: 'NO_CONNECTION', event: _event })
+      return this
+    }
+
+    if( typeof payload == 'function' ){
+      fn = payload as AckFunction
+      payload = undefined
+    }
+
+    try {
+      const sanitizedPayload = payload
+        ? sanitizePayload( payload, this.options.maxMessageSize! )
+        : payload
+
+      let cid: string | undefined
+      if( typeof fn === 'function' ){
+        const ackFunction = fn
+        cid = ackId()
+        this.once(`${_event}--${cid}--@ack`, ({ error, args }) => ackFunction( error, ...args ))
+      }
+
+      const unsigned: Omit<MessageData, 'auth'> = {
+        _event,
+        payload: sanitizedPayload,
+        cid,
+        timestamp: Date.now(),
+        size: getMessageSize( sanitizedPayload )
+      }
+
+      const auth = await this.signOutgoing( unsigned )
+      const messageData: MessageData = { ...unsigned, auth }
+
+      this.peer.source.postMessage( newObject( messageData ), this.peer.origin as string )
+    }
+    catch( error ){
+      this.debug(`[${this.peer.type}] EmitSigned error:`, error)
+      this.fire('error', {
+        type: 'EMIT_ERROR',
+        event: _event,
+        error: error instanceof Error ? error.message : String(error)
+      })
+      typeof fn === 'function'
+      && fn( error instanceof Error ? error.message : String(error) )
+    }
+
+    return this
+  }
+
+  async emitAsyncSigned<T = any, R = any>( _event: string, payload?: T, timeout: number = 5000 ): Promise<R> {
+    return new Promise(( resolve, reject ) => {
+      const timeoutId = setTimeout(() => reject( new Error(`Event '${_event}' acknowledgment timeout after ${timeout}ms`) ), timeout )
+
+      this.emitSigned( _event, payload as any, ( error, ...args ) => {
+        clearTimeout( timeoutId )
+        error
+          ? reject( new Error( typeof error === 'string' ? error : 'Ack error' ) )
+          : resolve( args.length === 0 ? undefined : args.length === 1 ? args[0] : args as any )
+      }).catch( err => {
+        clearTimeout( timeoutId )
+        reject( err )
+      })
+    })
   }
 
   on( _event: string, fn: Listener ){
