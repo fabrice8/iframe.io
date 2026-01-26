@@ -89,7 +89,9 @@ const iframeIO = new IOF({
   maxMessageSize: 1024 * 1024,       // Max message size in bytes (1MB)
   maxMessagesPerSecond: 100,         // Rate limit (100 messages/second)
   autoReconnect: true,               // Enable automatic reconnection
-  messageQueueSize: 50               // Max queued messages when disconnected
+  messageQueueSize: 50,              // Max queued messages when disconnected
+  allowedIncomingEvents: ['hello', 'response'], // Optional incoming event allowlist (non-reserved events)
+  validateIncoming: (event, payload, origin) => true // Optional custom incoming validator
 })
 ```
 
@@ -206,6 +208,29 @@ const iframeIO = new IOF({
 iframeIO.on('error', (error) => {
   if (error.type === 'RATE_LIMIT_EXCEEDED') {
     console.log(`Rate limited: ${error.current}/${error.limit}`)
+  }
+})
+```
+
+### Incoming Event Allowlist & Validation
+
+For defense-in-depth, you can restrict which **application-level** events are accepted and/or validate incoming payloads. Reserved internal events (`ping`, `pong`, `__heartbeat`, `__heartbeat_response`) are always allowed.
+
+```javascript
+const iframeIO = new IOF({
+  type: 'IFRAME',
+  debug: true,
+  allowedIncomingEvents: ['getData', 'hello'],
+  validateIncoming: (event, payload, origin) => {
+    // Example: basic shape checks
+    if (event === 'getData') return payload && typeof payload.id === 'number'
+    return true
+  }
+})
+
+iframeIO.on('error', (error) => {
+  if (error.type === 'DISALLOWED_EVENT' || error.type === 'INVALID_MESSAGE') {
+    console.warn('Dropped incoming message:', error)
   }
 })
 ```
@@ -338,6 +363,8 @@ const response = await iframeIO.emitAsync<{ query: string }, ApiResponse>(
 | `MESSAGE_HANDLING_ERROR` | Error processing incoming message |
 | `EMIT_ERROR` | Error sending message |
 | `LISTENER_ERROR` | Error in event listener |
+| `DISALLOWED_EVENT` | Incoming event rejected by `allowedIncomingEvents` |
+| `INVALID_MESSAGE` | Incoming message rejected by `validateIncoming` |
 | `RATE_LIMIT_EXCEEDED` | Too many messages sent |
 | `NO_CONNECTION` | Attempted to send without connection |
 
