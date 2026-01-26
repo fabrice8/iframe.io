@@ -12,6 +12,16 @@ export type Options = {
   maxMessagesPerSecond?: number
   autoReconnect?: boolean
   messageQueueSize?: number
+  /**
+   * Optional allowlist of incoming application-level events.
+   * Reserved internal events (ping/pong/heartbeats) are always allowed.
+   */
+  allowedIncomingEvents?: string[]
+  /**
+   * Optional custom validator for incoming messages.
+   * Return false to drop a message; an 'error' event will be emitted.
+   */
+  validateIncoming?: ( event: string, payload: any, origin: string ) => boolean
 }
 
 export interface RegisteredEvents {
@@ -68,13 +78,32 @@ function sanitizePayload( payload: any, maxSize: number ): any {
 }
 
 const ackId = () => {
+  // Prefer cryptographically strong randomness when available
+  try {
+    const globalCrypto = (typeof crypto !== 'undefined'
+      ? crypto
+      : (typeof window !== 'undefined' && (window as any).crypto)
+        || (typeof globalThis !== 'undefined' && (globalThis as any).crypto))
+
+    if( globalCrypto && typeof globalCrypto.getRandomValues === 'function' ){
+      const buffer = new Uint32Array(4)
+      globalCrypto.getRandomValues( buffer )
+
+      const randomPart = Array.from( buffer ).map( n => n.toString( 16 ) ).join('')
+      return `${Date.now()}_${randomPart}`
+    }
+  }
+  catch{
+    // Fall back to Math.random-based implementation below
+  }
+
   const
   rmin = 100000,
   rmax = 999999,
-  timestamp = Date.now(),
-  random = Math.floor( Math.random() * ( rmax - rmin + 1 ) + rmin )
+  timestampFallback = Date.now(),
+  randomFallback = Math.floor( Math.random() * ( rmax - rmin + 1 ) + rmin )
 
-  return `${timestamp}_${random}`
+  return `${timestampFallback}_${randomFallback}`
 }
 
 const RESERVED_EVENTS = [
@@ -319,6 +348,31 @@ export default class IOF {
           this.debug(`[${this.peer.type}] connected`)
 
           return
+        }
+
+        // Optional application-level incoming validation (non-reserved events only)
+        if( !RESERVED_EVENTS.includes( _event ) ){
+          if( this.options.allowedIncomingEvents
+              && !this.options.allowedIncomingEvents.includes( _event ) ){
+            this.fire('error', {
+              type: 'DISALLOWED_EVENT',
+              direction: 'incoming',
+              event: _event,
+              origin
+            })
+            return
+          }
+
+          if( this.options.validateIncoming
+              && !this.options.validateIncoming( _event, payload, origin ) ){
+            this.fire('error', {
+              type: 'INVALID_MESSAGE',
+              direction: 'incoming',
+              event: _event,
+              origin
+            })
+            return
+          }
         }
 
         // Fire available event listeners
