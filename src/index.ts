@@ -26,6 +26,27 @@ export type CryptoAuthOptions = {
    * Default: 500
    */
   replayWindowSize?: number
+  /**
+   * Enable session-derived keys for enhanced security.
+   * When enabled, a unique session key is derived from the master secret
+   * and exchanged session IDs during connection handshake.
+   * Recommended for long-lived connections and high-security applications.
+   * Default: false
+   */
+  enableSessionKeys?: boolean
+  /**
+   * How often to rotate session keys (in milliseconds).
+   * Only applies when enableSessionKeys is true.
+   * Default: 3600000 (1 hour)
+   */
+  sessionKeyRotationInterval?: number
+}
+
+export type SessionKeyInfo = {
+  keyId: string
+  key: string
+  createdAt: number
+  expiresAt: number
 }
 
 export type Options = {
@@ -64,9 +85,12 @@ export type Peer = {
   origin?: string
   connected?: boolean
   lastHeartbeat?: number
+  protocolVersion?: number
+  sessionId?: string
 }
 
 export type MessageData = {
+  v: number // Protocol version
   _event: string
   payload: any
   cid: string | undefined
@@ -77,7 +101,9 @@ export type MessageData = {
     ts: number
     nonce: string
     sig: string
+    keyId?: string // Used for session key rotation
   }
+  sessionId?: string // Used for session key exchange
 }
 
 export type Message = {
@@ -92,6 +118,9 @@ export type QueuedMessage = {
   fn?: AckFunction
   timestamp: number
 }
+
+// Current protocol version
+const PROTOCOL_VERSION = 1
 
 function newObject( data: object ){
   return JSON.parse( JSON.stringify( data ) )
@@ -183,6 +212,66 @@ async function hmacSha256Base64Url( secret: string, message: string ): Promise<s
   }
 }
 
+/**
+ * Derive a session key using HKDF-like construction
+ * HKDF(masterSecret, salt, info) where:
+ * - masterSecret: the shared secret
+ * - salt: combined session IDs
+ * - info: context string
+ */
+async function deriveSessionKey( masterSecret: string, sessionId1: string, sessionId2: string, keyId: string ): Promise<string> {
+  try {
+    const globalCrypto = getGlobalCrypto() as any
+    const subtle = globalCrypto?.subtle
+    
+    if( subtle && typeof subtle.importKey === 'function' && typeof subtle.deriveBits === 'function' ){
+      const enc = new TextEncoder()
+      
+      // Import master secret
+      const masterKey = await subtle.importKey(
+        'raw',
+        enc.encode( masterSecret ),
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign']
+      )
+      
+      // Create salt from session IDs
+      const salt = sessionId1 + '|' + sessionId2
+      
+      // PRK = HMAC(salt, masterSecret)
+      const prk = await subtle.sign( 'HMAC', masterKey, enc.encode( salt ) )
+      
+      // Import PRK as key
+      const prkKey = await subtle.importKey(
+        'raw',
+        prk,
+        { name: 'HMAC', hash: 'SHA-256' },
+        false,
+        ['sign']
+      )
+      
+      // OKM = HMAC(PRK, info | 0x01)
+      const info = 'iframe.io-session-key-' + keyId + '\x01'
+      const okm = await subtle.sign( 'HMAC', prkKey, enc.encode( info ) )
+      
+      // Convert to base64url
+      const bytes = new Uint8Array( okm )
+      const b64 = btoa( String.fromCharCode( ...bytes ) )
+      return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
+    }
+  }
+  catch( error ){
+    // Fallback for Node.js or if WebCrypto fails
+  }
+
+  // Simple HMAC-based KDF fallback
+  const salt = sessionId1 + '|' + sessionId2
+  const prk = await hmacSha256Base64Url( masterSecret, salt )
+  const info = 'iframe.io-session-key-' + keyId
+  return await hmacSha256Base64Url( prk, info )
+}
+
 const ackId = () => {
   // Prefer cryptographically strong randomness when available
   try {
@@ -213,7 +302,10 @@ const RESERVED_EVENTS = [
   'ping',
   'pong',
   '__heartbeat',
-  '__heartbeat_response'
+  '__heartbeat_response',
+  '__session_key_init',
+  '__session_key_rotate',
+  '__session_key_ack'
 ]
 
 export default class IOF {
@@ -223,11 +315,18 @@ export default class IOF {
   private messageListener?: ( event: MessageEvent ) => void
   private heartbeatTimer?: number
   private reconnectTimer?: number
+  private sessionKeyRotationTimer?: number
   private messageQueue: QueuedMessage[] = []
   private messageRateTracker: number[] = []
   private reconnectAttempts: number = 0
   private maxReconnectAttempts: number = 5
   private seenNonces: Map<string, number> = new Map()
+  
+  // Session key management
+  private currentSessionKey?: SessionKeyInfo
+  private pendingSessionKey?: SessionKeyInfo
+  private previousSessionKey?: SessionKeyInfo
+  private mySessionId?: string
 
   constructor( options: Options = {} ){
     if( options && typeof options !== 'object' )
@@ -256,7 +355,9 @@ export default class IOF {
       secret: this.options.cryptoAuth.secret,
       requireSigned: !!this.options.cryptoAuth.requireSigned,
       maxSkewMs: this.options.cryptoAuth.maxSkewMs ?? 2 * 60 * 1000,
-      replayWindowSize: this.options.cryptoAuth.replayWindowSize ?? 500
+      replayWindowSize: this.options.cryptoAuth.replayWindowSize ?? 500,
+      enableSessionKeys: !!this.options.cryptoAuth.enableSessionKeys,
+      sessionKeyRotationInterval: this.options.cryptoAuth.sessionKeyRotationInterval ?? 3600000 // 1 hour
     }
   }
 
@@ -272,13 +373,253 @@ export default class IOF {
     }
   }
 
+  /**
+   * Get the appropriate secret for signing messages
+   * Uses session key if available, otherwise falls back to master secret
+   */
+  private getSigningSecret(): { secret: string, keyId?: string } {
+    const cfg = this.cryptoCfg()
+    if( !cfg ) return { secret: '' }
+
+    // Use session key if enabled and available
+    if( cfg.enableSessionKeys && this.currentSessionKey ){
+      return {
+        secret: this.currentSessionKey.key,
+        keyId: this.currentSessionKey.keyId
+      }
+    }
+
+    // Fall back to master secret
+    return { secret: cfg.secret }
+  }
+
+  /**
+   * Get the appropriate secret for verifying incoming messages
+   * Tries current key, then pending, then previous, then master
+   */
+  private getVerificationSecrets(): Array<{ secret: string, keyId?: string }> {
+    const cfg = this.cryptoCfg()
+    if( !cfg ) return []
+
+    const secrets: Array<{ secret: string, keyId?: string }> = []
+
+    if( cfg.enableSessionKeys ){
+      // Try current session key first
+      if( this.currentSessionKey ){
+        secrets.push({
+          secret: this.currentSessionKey.key,
+          keyId: this.currentSessionKey.keyId
+        })
+      }
+
+      // Try pending key during rotation
+      if( this.pendingSessionKey ){
+        secrets.push({
+          secret: this.pendingSessionKey.key,
+          keyId: this.pendingSessionKey.keyId
+        })
+      }
+
+      // Try previous key for grace period
+      if( this.previousSessionKey ){
+        const now = Date.now()
+        if( now < this.previousSessionKey.expiresAt ){
+          secrets.push({
+            secret: this.previousSessionKey.key,
+            keyId: this.previousSessionKey.keyId
+          })
+        }
+      }
+    }
+
+    // Always try master secret as fallback
+    secrets.push({ secret: cfg.secret })
+
+    return secrets
+  }
+
+  /**
+   * Initialize session key exchange
+   * Called after connection is established if enableSessionKeys is true
+   */
+  private async initiateSessionKeyExchange(){
+    const cfg = this.cryptoCfg()
+    if( !cfg || !cfg.enableSessionKeys ) return
+
+    this.debug(`[${this.peer.type}] Initiating session key exchange`)
+
+    // Generate my session ID
+    this.mySessionId = randomHex( 32 )
+
+    // Send session ID to peer
+    this.emit('__session_key_init', { sessionId: this.mySessionId })
+  }
+
+  /**
+   * Handle incoming session key initialization
+   */
+  private async handleSessionKeyInit( peerSessionId: string ){
+    const cfg = this.cryptoCfg()
+    if( !cfg || !cfg.enableSessionKeys ) return
+
+    this.debug(`[${this.peer.type}] Received session key init from peer`)
+
+    // Generate my session ID if not already done
+    if( !this.mySessionId ){
+      this.mySessionId = randomHex( 32 )
+    }
+
+    // Store peer session ID
+    this.peer.sessionId = peerSessionId
+
+    // Derive session key
+    const keyId = `key-${Date.now()}-${randomHex(8)}`
+    const sessionKey = await this.deriveAndStoreSessionKey( keyId )
+
+    // Send acknowledgment with my session ID
+    this.emit('__session_key_ack', {
+      sessionId: this.mySessionId,
+      keyId: keyId
+    })
+
+    this.debug(`[${this.peer.type}] Session key established: ${keyId}`)
+    
+    // Start rotation timer
+    this.startSessionKeyRotation()
+  }
+
+  /**
+   * Handle session key acknowledgment
+   */
+  private async handleSessionKeyAck( data: { sessionId: string, keyId: string } ){
+    const cfg = this.cryptoCfg()
+    if( !cfg || !cfg.enableSessionKeys ) return
+
+    this.debug(`[${this.peer.type}] Received session key ack from peer`)
+
+    // Store peer session ID
+    this.peer.sessionId = data.sessionId
+
+    // Derive session key using the same keyId
+    await this.deriveAndStoreSessionKey( data.keyId )
+
+    this.debug(`[${this.peer.type}] Session key established: ${data.keyId}`)
+    
+    // Start rotation timer
+    this.startSessionKeyRotation()
+  }
+
+  /**
+   * Derive and store a session key
+   */
+  private async deriveAndStoreSessionKey( keyId: string ): Promise<SessionKeyInfo> {
+    const cfg = this.cryptoCfg()
+    if( !cfg || !this.mySessionId || !this.peer.sessionId ){
+      throw new Error('Cannot derive session key: missing session IDs')
+    }
+
+    // Ensure consistent ordering of session IDs
+    const [id1, id2] = [this.mySessionId, this.peer.sessionId].sort()
+
+    const key = await deriveSessionKey( cfg.secret, id1, id2, keyId )
+
+    const now = Date.now()
+    const sessionKeyInfo: SessionKeyInfo = {
+      keyId,
+      key,
+      createdAt: now,
+      expiresAt: now + cfg.sessionKeyRotationInterval + 60000 // Grace period of 1 minute
+    }
+
+    // Rotate keys: current -> previous, new -> current
+    if( this.currentSessionKey ){
+      this.previousSessionKey = this.currentSessionKey
+    }
+
+    this.currentSessionKey = sessionKeyInfo
+    
+    this.fire('session_key_established', { keyId })
+
+    return sessionKeyInfo
+  }
+
+  /**
+   * Start session key rotation timer
+   */
+  private startSessionKeyRotation(){
+    const cfg = this.cryptoCfg()
+    if( !cfg || !cfg.enableSessionKeys ) return
+
+    // Clear existing timer
+    if( this.sessionKeyRotationTimer ){
+      clearInterval( this.sessionKeyRotationTimer )
+    }
+
+    this.sessionKeyRotationTimer = setInterval(() => {
+      this.rotateSessionKey()
+    }, cfg.sessionKeyRotationInterval )
+
+    this.debug(`[${this.peer.type}] Session key rotation timer started (${cfg.sessionKeyRotationInterval}ms)`)
+  }
+
+  /**
+   * Rotate session key
+   */
+  private async rotateSessionKey(){
+    const cfg = this.cryptoCfg()
+    if( !cfg || !cfg.enableSessionKeys || !this.isConnected() ) return
+
+    this.debug(`[${this.peer.type}] Rotating session key`)
+
+    const newKeyId = `key-${Date.now()}-${randomHex(8)}`
+
+    // Derive new key
+    const newSessionKey = await this.deriveAndStoreSessionKey( newKeyId )
+
+    // Set as pending until peer acknowledges
+    this.pendingSessionKey = newSessionKey
+
+    // Notify peer of rotation
+    this.emit('__session_key_rotate', { keyId: newKeyId })
+
+    this.fire('session_key_rotating', { keyId: newKeyId })
+  }
+
+  /**
+   * Handle incoming session key rotation
+   */
+  private async handleSessionKeyRotate( data: { keyId: string } ){
+    const cfg = this.cryptoCfg()
+    if( !cfg || !cfg.enableSessionKeys ) return
+
+    this.debug(`[${this.peer.type}] Peer rotating session key to: ${data.keyId}`)
+
+    // Derive the same key
+    await this.deriveAndStoreSessionKey( data.keyId )
+
+    this.fire('session_key_rotated', { keyId: data.keyId })
+  }
+
+  /**
+   * Stop session key rotation timer
+   */
+  private stopSessionKeyRotation(){
+    if( this.sessionKeyRotationTimer ){
+      clearInterval( this.sessionKeyRotationTimer )
+      this.sessionKeyRotationTimer = undefined
+    }
+  }
+
   private async signOutgoing( messageData: Omit<MessageData, 'auth'> ): Promise<MessageData['auth']> {
     const cfg = this.cryptoCfg()
     if( !cfg ) return undefined
 
+    const { secret, keyId } = this.getSigningSecret()
+
     const ts = Date.now()
     const nonce = randomHex( 16 )
     const canonical = JSON.stringify({
+      v: messageData.v,
       _event: messageData._event,
       payload: messageData.payload,
       cid: messageData.cid,
@@ -287,9 +628,9 @@ export default class IOF {
       ts,
       nonce
     })
-    const sig = await hmacSha256Base64Url( cfg.secret, canonical )
+    const sig = await hmacSha256Base64Url( secret, canonical )
 
-    return { alg: 'HMAC-SHA256', ts, nonce, sig }
+    return { alg: 'HMAC-SHA256', ts, nonce, sig, keyId }
   }
 
   private async verifyIncomingAuth( data: MessageData, origin: string ): Promise<boolean> {
@@ -300,7 +641,7 @@ export default class IOF {
       return !cfg.requireSigned
     }
 
-    const { alg, ts, nonce, sig } = data.auth
+    const { alg, ts, nonce, sig, keyId } = data.auth
     if( alg !== 'HMAC-SHA256' ) return false
     if( typeof ts !== 'number' || typeof nonce !== 'string' || typeof sig !== 'string' ) return false
 
@@ -313,6 +654,7 @@ export default class IOF {
     this.pruneNonces( cfg.replayWindowSize )
 
     const canonical = JSON.stringify({
+      v: data.v,
       _event: data._event,
       payload: data.payload,
       cid: data.cid,
@@ -321,9 +663,27 @@ export default class IOF {
       ts,
       nonce
     })
-    const expected = await hmacSha256Base64Url( cfg.secret, canonical )
 
-    return constantTimeEqual( expected, sig )
+    // Try all available secrets
+    const secrets = this.getVerificationSecrets()
+
+    for( const { secret, keyId: secretKeyId } of secrets ){
+      // If message has keyId, only try matching secret
+      if( keyId && secretKeyId && keyId !== secretKeyId ) continue
+
+      try {
+        const expected = await hmacSha256Base64Url( secret, canonical )
+        if( constantTimeEqual( expected, sig ) ){
+          this.debug(`[${this.peer.type}] Auth verified${keyId ? ` with key: ${keyId}` : ''}`)
+          return true
+        }
+      }
+      catch( error ){
+        this.debug(`[${this.peer.type}] Auth verification error:`, error)
+      }
+    }
+
+    return false
   }
 
   debug( ...args: any[] ){
@@ -374,6 +734,7 @@ export default class IOF {
 
     this.peer.connected = false
     this.stopHeartbeat()
+    this.stopSessionKeyRotation()
     this.fire('disconnect', { reason: 'CONNECTION_LOST' })
 
     this.options.autoReconnect
@@ -498,7 +859,39 @@ export default class IOF {
             || typeof data !== 'object'
             || !data.hasOwnProperty('_event') ) return
 
-        const { _event, payload, cid, timestamp } = data as Message['data']
+        const { v, _event, payload, cid, timestamp, sessionId } = data as Message['data']
+
+        // Protocol version check
+        const messageVersion = v || 1
+        if( messageVersion > PROTOCOL_VERSION ){
+          this.fire('error', {
+            type: 'UNSUPPORTED_VERSION',
+            received: messageVersion,
+            supported: PROTOCOL_VERSION
+          })
+          return
+        }
+
+        // Store peer protocol version
+        if( !this.peer.protocolVersion || this.peer.protocolVersion < messageVersion ){
+          this.peer.protocolVersion = messageVersion
+        }
+
+        // Handle session key events
+        if( _event === '__session_key_init' ){
+          this.handleSessionKeyInit( payload.sessionId )
+          return
+        }
+
+        if( _event === '__session_key_ack' ){
+          this.handleSessionKeyAck( payload )
+          return
+        }
+
+        if( _event === '__session_key_rotate' ){
+          this.handleSessionKeyRotate( payload )
+          return
+        }
 
         // Handle heartbeat responses
         if( _event === '__heartbeat_response' ){
@@ -513,7 +906,7 @@ export default class IOF {
           return
         }
 
-        this.debug(`[${this.peer.type}] Message: ${_event}`, payload || '')
+        this.debug(`[${this.peer.type}] Message v${messageVersion}: ${_event}`, payload || '')
 
         // Handshake or availability check events
         if( _event == 'pong' ){
@@ -524,6 +917,10 @@ export default class IOF {
           
           this.startHeartbeat()
           this.fire('connect')
+          
+          // Initiate session key exchange if enabled
+          this.initiateSessionKeyExchange()
+          
           this.processMessageQueue()
           this.debug(`[${this.peer.type}] connected`)
 
@@ -662,7 +1059,39 @@ export default class IOF {
           return
         }
 
-        const { _event, payload, cid, timestamp } = data
+        const { v, _event, payload, cid, timestamp } = data
+
+        // Protocol version check
+        const messageVersion = v || 1
+        if( messageVersion > PROTOCOL_VERSION ){
+          this.fire('error', {
+            type: 'UNSUPPORTED_VERSION',
+            received: messageVersion,
+            supported: PROTOCOL_VERSION
+          })
+          return
+        }
+
+        // Store peer protocol version
+        if( !this.peer.protocolVersion || this.peer.protocolVersion < messageVersion ){
+          this.peer.protocolVersion = messageVersion
+        }
+
+        // Handle session key events
+        if( _event === '__session_key_init' ){
+          this.handleSessionKeyInit( payload.sessionId )
+          return
+        }
+
+        if( _event === '__session_key_ack' ){
+          this.handleSessionKeyAck( payload )
+          return
+        }
+
+        if( _event === '__session_key_rotate' ){
+          this.handleSessionKeyRotate( payload )
+          return
+        }
 
         // Handle heartbeat responses
         if( _event === '__heartbeat_response' ){
@@ -677,7 +1106,7 @@ export default class IOF {
           return
         }
 
-        this.debug(`[${this.peer.type}] Message: ${_event}`, payload || '')
+        this.debug(`[${this.peer.type}] Message v${messageVersion}: ${_event}`, payload || '')
 
         // Handshake or availability check events
         if( _event == 'ping' ){
@@ -689,6 +1118,10 @@ export default class IOF {
           this.peer.lastHeartbeat = Date.now()
           this.startHeartbeat()
           this.fire('connect')
+          
+          // Initiate session key exchange if enabled
+          this.initiateSessionKeyExchange()
+          
           this.processMessageQueue()
 
           this.debug(`[${this.peer.type}] connected`)
@@ -830,6 +1263,7 @@ export default class IOF {
       }
 
       const messageData = {
+        v: PROTOCOL_VERSION,
         _event,
         payload: sanitizedPayload,
         cid,
@@ -897,6 +1331,7 @@ export default class IOF {
       }
 
       const unsigned: Omit<MessageData, 'auth'> = {
+        v: PROTOCOL_VERSION,
         _event,
         payload: sanitizedPayload,
         cid,
@@ -1042,6 +1477,7 @@ export default class IOF {
     }
 
     this.stopHeartbeat()
+    this.stopSessionKeyRotation()
 
     if( this.reconnectTimer ){
       clearTimeout( this.reconnectTimer )
@@ -1057,9 +1493,18 @@ export default class IOF {
     this.peer.source = undefined
     this.peer.origin = undefined
     this.peer.lastHeartbeat = undefined
+    this.peer.protocolVersion = undefined
+    this.peer.sessionId = undefined
+    
     this.messageQueue = []
     this.messageRateTracker = []
     this.reconnectAttempts = 0
+    
+    // Clear session keys
+    this.currentSessionKey = undefined
+    this.pendingSessionKey = undefined
+    this.previousSessionKey = undefined
+    this.mySessionId = undefined
 
     this.removeListeners()
 
@@ -1079,7 +1524,11 @@ export default class IOF {
       queuedMessages: this.messageQueue.length,
       reconnectAttempts: this.reconnectAttempts,
       activeListeners: Object.keys( this.Events ).length,
-      messageRate: this.messageRateTracker.length
+      messageRate: this.messageRateTracker.length,
+      protocolVersion: PROTOCOL_VERSION,
+      peerProtocolVersion: this.peer.protocolVersion,
+      sessionKeyActive: !!this.currentSessionKey,
+      sessionKeyId: this.currentSessionKey?.keyId
     }
   }
 
