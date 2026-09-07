@@ -1,0 +1,48 @@
+# Neither library had any tests until 2026-09-07, and nothing ran what the
+# package.json claimed to run — `test:types` and `test:unit` invoked tsd and
+# nyc, which were never dependencies, against a test/ directory that did not
+# exist. This is what stops that recurring.
+
+name: CI
+
+on:
+  push:
+    branches: [ main, master ]
+  pull_request:
+  workflow_dispatch:
+
+concurrency:
+  group: ci-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+
+    strategy:
+      fail-fast: false
+      matrix:
+        # `node --test` takes a glob from 21 onwards, which the test script uses.
+        node: [ 22, 24 ]
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: ${{ matrix.node }}
+          cache: yarn
+
+      # yarn, to honour the committed yarn.lock — the scripts themselves call
+      # npm, because npm's lifecycle PATH has no yarn and that broke publishing.
+      - run: yarn install --frozen-lockfile
+
+      # Compiles, then runs the suite against the emitted dist — the same
+      # artefact `prepack` publishes.
+      - run: yarn test
+
+      # Proves the publish lifecycle works and shows what would ship. `prepack`
+      # used to shell out to yarn, which npm's lifecycle PATH does not have, so
+      # `npm publish` failed outright.
+      - run: npm pack --dry-run
