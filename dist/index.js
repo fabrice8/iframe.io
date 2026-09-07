@@ -1,5 +1,7 @@
 "use strict";
 Object.defineProperty(exports, "__esModule", { value: true });
+// Current protocol version
+const PROTOCOL_VERSION = 1;
 function newObject(data) {
     return JSON.parse(JSON.stringify(data));
 }
@@ -79,6 +81,42 @@ async function hmacSha256Base64Url(secret, message) {
         throw new Error('No crypto implementation available for HMAC-SHA256');
     }
 }
+/**
+ * Derive a session key using HKDF-like construction
+ * HKDF(masterSecret, salt, info) where:
+ * - masterSecret: the shared secret
+ * - salt: combined session IDs
+ * - info: context string
+ */
+async function deriveSessionKey(masterSecret, sessionId1, sessionId2, keyId) {
+    /**
+     * Two HMAC steps, both through `hmacSha256Base64Url`, deliberately.
+     *
+     * This used to have a WebCrypto branch alongside this one, and the two did
+     * not agree: the WebCrypto path fed the extract step's RAW bytes into the
+     * expand step and appended \x01 to the info string, while this path fed the
+     * base64url TEXT of those bytes and appended nothing. Same inputs, different
+     * keys.
+     *
+     * Peers do not have to share an implementation for that to matter, only an
+     * environment: `crypto.subtle` is undefined outside a secure context, so a
+     * WebView or iframe served over plain HTTP took one branch while an HTTPS
+     * host took the other. Every signed message then failed to verify — and
+     * because the WebCrypto branch was also entered from a silent catch, a
+     * single transient failure on one side desynchronised the pair for the rest
+     * of the connection.
+     *
+     * `hmacSha256Base64Url` already resolves WebCrypto vs Node internally and
+     * returns the same string either way, so deriving through it twice is both
+     * shorter and the only version that can agree with itself.
+     */
+    const salt = sessionId1 + '|' + sessionId2, 
+    // Extract: PRK = HMAC( masterSecret, salt )
+    prk = await hmacSha256Base64Url(masterSecret, salt), 
+    // Expand: OKM = HMAC( PRK, info )
+    info = 'iframe.io-session-key-' + keyId;
+    return await hmacSha256Base64Url(prk, info);
+}
 const ackId = () => {
     // Prefer cryptographically strong randomness when available
     try {
@@ -96,11 +134,21 @@ const ackId = () => {
     const rmin = 100000, rmax = 999999, timestampFallback = Date.now(), randomFallback = Math.floor(Math.random() * (rmax - rmin + 1) + rmin);
     return `${timestampFallback}_${randomFallback}`;
 };
+// Answered before authentication, so they are gated separately — see the
+// handlers in initiate() and listen().
+const RESERVED_SESSION_KEY_EVENTS = [
+    '__session_key_init',
+    '__session_key_rotate',
+    '__session_key_ack'
+];
 const RESERVED_EVENTS = [
     'ping',
     'pong',
     '__heartbeat',
-    '__heartbeat_response'
+    '__heartbeat_response',
+    '__session_key_init',
+    '__session_key_rotate',
+    '__session_key_ack'
 ];
 class IOF {
     constructor(options = {}) {
@@ -133,29 +181,288 @@ class IOF {
             secret: this.options.cryptoAuth.secret,
             requireSigned: !!this.options.cryptoAuth.requireSigned,
             maxSkewMs: this.options.cryptoAuth.maxSkewMs ?? 2 * 60 * 1000,
-            replayWindowSize: this.options.cryptoAuth.replayWindowSize ?? 500
+            replayWindowSize: this.options.cryptoAuth.replayWindowSize ?? 500,
+            enableSessionKeys: !!this.options.cryptoAuth.enableSessionKeys,
+            sessionKeyRotationInterval: this.options.cryptoAuth.sessionKeyRotationInterval ?? 3600000 // 1 hour
         };
     }
+    /**
+     * Forget nonces that can no longer be replayed, and only then cap the map.
+     *
+     * Age is what actually decides replayability: a captured message is refused
+     * once its `ts` falls outside maxSkewMs, so a nonce is only worth keeping
+     * that long. Pruning purely by count — as this did — made the two defaults
+     * contradict each other: 500 remembered nonces at the default 100 messages a
+     * second is five seconds of history guarding a two-minute acceptance window,
+     * so anything captured could simply be replayed after five seconds.
+     *
+     * The count cap stays as a memory bound. Reaching it means the rate limiter
+     * is admitting more traffic than the window can remember, so it is reported
+     * rather than applied in silence.
+     */
     pruneNonces(maxSize) {
+        const cutoff = Date.now() - (this.cryptoCfg()?.maxSkewMs ?? 2 * 60 * 1000);
+        for (const [nonce, ts] of this.seenNonces)
+            if (ts < cutoff)
+                this.seenNonces.delete(nonce);
         if (this.seenNonces.size <= maxSize)
             return;
-        // Remove oldest inserted entries
+        this.fire('error', {
+            type: 'REPLAY_WINDOW_EXCEEDED',
+            remembered: this.seenNonces.size,
+            maxSize
+        });
+        // Oldest first — Map iterates in insertion order, and nonces are inserted
+        // as they arrive.
         const toRemove = this.seenNonces.size - maxSize;
         let i = 0;
         for (const key of this.seenNonces.keys()) {
             this.seenNonces.delete(key);
-            i++;
-            if (i >= toRemove)
+            if (++i >= toRemove)
                 break;
+        }
+    }
+    /**
+     * Get the appropriate secret for signing messages
+     * Uses session key if available, otherwise falls back to master secret
+     */
+    getSigningSecret() {
+        const cfg = this.cryptoCfg();
+        if (!cfg)
+            return { secret: '' };
+        // Use session key if enabled and available
+        if (cfg.enableSessionKeys && this.currentSessionKey) {
+            return {
+                secret: this.currentSessionKey.key,
+                keyId: this.currentSessionKey.keyId
+            };
+        }
+        // Fall back to master secret
+        return { secret: cfg.secret };
+    }
+    /**
+     * Get the appropriate secret for verifying incoming messages
+     * Tries current key, then pending, then previous, then master
+     */
+    getVerificationSecrets() {
+        const cfg = this.cryptoCfg();
+        if (!cfg)
+            return [];
+        const secrets = [];
+        if (cfg.enableSessionKeys) {
+            // Try current session key first
+            if (this.currentSessionKey) {
+                secrets.push({
+                    secret: this.currentSessionKey.key,
+                    keyId: this.currentSessionKey.keyId
+                });
+            }
+            // Try pending key during rotation
+            if (this.pendingSessionKey) {
+                secrets.push({
+                    secret: this.pendingSessionKey.key,
+                    keyId: this.pendingSessionKey.keyId
+                });
+            }
+            // Try previous key for grace period
+            if (this.previousSessionKey) {
+                const now = Date.now();
+                if (now < this.previousSessionKey.expiresAt) {
+                    secrets.push({
+                        secret: this.previousSessionKey.key,
+                        keyId: this.previousSessionKey.keyId
+                    });
+                }
+            }
+        }
+        // Always try master secret as fallback
+        secrets.push({ secret: cfg.secret });
+        return secrets;
+    }
+    /**
+     * Application-level admission check for one incoming message.
+     *
+     * Reserved events bypass it deliberately: the handshake and the heartbeats
+     * must survive an allow-list that does not name them, or configuring one
+     * would silently sever the connection.
+     *
+     * This lives in a method because it used to be written out at each place a
+     * message can arrive — the authenticated and unauthenticated branches of
+     * `initiate()` and of `listen()` — and `listen()`'s unauthenticated branch
+     * never got a copy. An embedded bridge configured with an allow-list and no
+     * cryptoAuth, which is exactly how de.eui runs it, therefore accepted every
+     * event name a host cared to send.
+     */
+    acceptIncoming(_event, payload, origin) {
+        if (RESERVED_EVENTS.includes(_event))
+            return true;
+        if (this.options.allowedIncomingEvents
+            && !this.options.allowedIncomingEvents.includes(_event)) {
+            this.fire('error', {
+                type: 'DISALLOWED_EVENT',
+                direction: 'incoming',
+                event: _event,
+                origin
+            });
+            return false;
+        }
+        if (this.options.validateIncoming
+            && !this.options.validateIncoming(_event, payload, origin)) {
+            this.fire('error', {
+                type: 'INVALID_MESSAGE',
+                direction: 'incoming',
+                event: _event,
+                origin
+            });
+            return false;
+        }
+        return true;
+    }
+    /**
+     * Initialize session key exchange
+     * Called after connection is established if enableSessionKeys is true
+     */
+    async initiateSessionKeyExchange() {
+        const cfg = this.cryptoCfg();
+        if (!cfg || !cfg.enableSessionKeys)
+            return;
+        this.debug(`[${this.peer.type}] Initiating session key exchange`);
+        // Generate my session ID
+        this.mySessionId = randomHex(32);
+        // Send session ID to peer
+        this.emit('__session_key_init', { sessionId: this.mySessionId });
+    }
+    /**
+     * Handle incoming session key initialization
+     */
+    async handleSessionKeyInit(peerSessionId) {
+        const cfg = this.cryptoCfg();
+        if (!cfg || !cfg.enableSessionKeys)
+            return;
+        this.debug(`[${this.peer.type}] Received session key init from peer`);
+        // Generate my session ID if not already done
+        if (!this.mySessionId) {
+            this.mySessionId = randomHex(32);
+        }
+        // Store peer session ID
+        this.peer.sessionId = peerSessionId;
+        // Derive session key
+        const keyId = `key-${Date.now()}-${randomHex(8)}`;
+        const sessionKey = await this.deriveAndStoreSessionKey(keyId);
+        // Send acknowledgment with my session ID
+        this.emit('__session_key_ack', {
+            sessionId: this.mySessionId,
+            keyId: keyId
+        });
+        this.debug(`[${this.peer.type}] Session key established: ${keyId}`);
+        // Start rotation timer
+        this.startSessionKeyRotation();
+    }
+    /**
+     * Handle session key acknowledgment
+     */
+    async handleSessionKeyAck(data) {
+        const cfg = this.cryptoCfg();
+        if (!cfg || !cfg.enableSessionKeys)
+            return;
+        this.debug(`[${this.peer.type}] Received session key ack from peer`);
+        // Store peer session ID
+        this.peer.sessionId = data.sessionId;
+        // Derive session key using the same keyId
+        await this.deriveAndStoreSessionKey(data.keyId);
+        this.debug(`[${this.peer.type}] Session key established: ${data.keyId}`);
+        // Start rotation timer
+        this.startSessionKeyRotation();
+    }
+    /**
+     * Derive and store a session key
+     */
+    async deriveAndStoreSessionKey(keyId) {
+        const cfg = this.cryptoCfg();
+        if (!cfg || !this.mySessionId || !this.peer.sessionId) {
+            throw new Error('Cannot derive session key: missing session IDs');
+        }
+        // Ensure consistent ordering of session IDs
+        const [id1, id2] = [this.mySessionId, this.peer.sessionId].sort();
+        const key = await deriveSessionKey(cfg.secret, id1, id2, keyId);
+        const now = Date.now();
+        const sessionKeyInfo = {
+            keyId,
+            key,
+            createdAt: now,
+            expiresAt: now + cfg.sessionKeyRotationInterval + 60000 // Grace period of 1 minute
+        };
+        // Rotate keys: current -> previous, new -> current
+        if (this.currentSessionKey) {
+            this.previousSessionKey = this.currentSessionKey;
+        }
+        this.currentSessionKey = sessionKeyInfo;
+        this.fire('session_key_established', { keyId });
+        return sessionKeyInfo;
+    }
+    /**
+     * Start session key rotation timer
+     */
+    startSessionKeyRotation() {
+        const cfg = this.cryptoCfg();
+        if (!cfg || !cfg.enableSessionKeys)
+            return;
+        // Clear existing timer
+        if (this.sessionKeyRotationTimer) {
+            clearInterval(this.sessionKeyRotationTimer);
+        }
+        this.sessionKeyRotationTimer = setInterval(() => {
+            this.rotateSessionKey();
+        }, cfg.sessionKeyRotationInterval);
+        this.debug(`[${this.peer.type}] Session key rotation timer started (${cfg.sessionKeyRotationInterval}ms)`);
+    }
+    /**
+     * Rotate session key
+     */
+    async rotateSessionKey() {
+        const cfg = this.cryptoCfg();
+        if (!cfg || !cfg.enableSessionKeys || !this.isConnected())
+            return;
+        this.debug(`[${this.peer.type}] Rotating session key`);
+        const newKeyId = `key-${Date.now()}-${randomHex(8)}`;
+        // Derive new key
+        const newSessionKey = await this.deriveAndStoreSessionKey(newKeyId);
+        // Set as pending until peer acknowledges
+        this.pendingSessionKey = newSessionKey;
+        // Notify peer of rotation
+        this.emit('__session_key_rotate', { keyId: newKeyId });
+        this.fire('session_key_rotating', { keyId: newKeyId });
+    }
+    /**
+     * Handle incoming session key rotation
+     */
+    async handleSessionKeyRotate(data) {
+        const cfg = this.cryptoCfg();
+        if (!cfg || !cfg.enableSessionKeys)
+            return;
+        this.debug(`[${this.peer.type}] Peer rotating session key to: ${data.keyId}`);
+        // Derive the same key
+        await this.deriveAndStoreSessionKey(data.keyId);
+        this.fire('session_key_rotated', { keyId: data.keyId });
+    }
+    /**
+     * Stop session key rotation timer
+     */
+    stopSessionKeyRotation() {
+        if (this.sessionKeyRotationTimer) {
+            clearInterval(this.sessionKeyRotationTimer);
+            this.sessionKeyRotationTimer = undefined;
         }
     }
     async signOutgoing(messageData) {
         const cfg = this.cryptoCfg();
         if (!cfg)
             return undefined;
+        const { secret, keyId } = this.getSigningSecret();
         const ts = Date.now();
         const nonce = randomHex(16);
         const canonical = JSON.stringify({
+            v: messageData.v,
             _event: messageData._event,
             payload: messageData.payload,
             cid: messageData.cid,
@@ -164,8 +471,8 @@ class IOF {
             ts,
             nonce
         });
-        const sig = await hmacSha256Base64Url(cfg.secret, canonical);
-        return { alg: 'HMAC-SHA256', ts, nonce, sig };
+        const sig = await hmacSha256Base64Url(secret, canonical);
+        return { alg: 'HMAC-SHA256', ts, nonce, sig, keyId };
     }
     async verifyIncomingAuth(data, origin) {
         const cfg = this.cryptoCfg();
@@ -174,7 +481,7 @@ class IOF {
         if (!data.auth) {
             return !cfg.requireSigned;
         }
-        const { alg, ts, nonce, sig } = data.auth;
+        const { alg, ts, nonce, sig, keyId } = data.auth;
         if (alg !== 'HMAC-SHA256')
             return false;
         if (typeof ts !== 'number' || typeof nonce !== 'string' || typeof sig !== 'string')
@@ -182,12 +489,13 @@ class IOF {
         const now = Date.now();
         if (Math.abs(now - ts) > cfg.maxSkewMs)
             return false;
-        // Replay protection
+        // Replay protection. The nonce is only recorded once the signature has been
+        // checked, further down: burning it here let an unsigned or badly signed
+        // message consume the nonce of a legitimate one still in flight.
         if (this.seenNonces.has(nonce))
             return false;
-        this.seenNonces.set(nonce, ts);
-        this.pruneNonces(cfg.replayWindowSize);
         const canonical = JSON.stringify({
+            v: data.v,
             _event: data._event,
             payload: data.payload,
             cid: data.cid,
@@ -196,8 +504,26 @@ class IOF {
             ts,
             nonce
         });
-        const expected = await hmacSha256Base64Url(cfg.secret, canonical);
-        return constantTimeEqual(expected, sig);
+        // Try all available secrets
+        const secrets = this.getVerificationSecrets();
+        for (const { secret, keyId: secretKeyId } of secrets) {
+            // If message has keyId, only try matching secret
+            if (keyId && secretKeyId && keyId !== secretKeyId)
+                continue;
+            try {
+                const expected = await hmacSha256Base64Url(secret, canonical);
+                if (constantTimeEqual(expected, sig)) {
+                    this.seenNonces.set(nonce, ts);
+                    this.pruneNonces(cfg.replayWindowSize);
+                    this.debug(`[${this.peer.type}] Auth verified${keyId ? ` with key: ${keyId}` : ''}`);
+                    return true;
+                }
+            }
+            catch (error) {
+                this.debug(`[${this.peer.type}] Auth verification error:`, error);
+            }
+        }
+        return false;
     }
     debug(...args) {
         this.options.debug && console.debug(...args);
@@ -242,6 +568,7 @@ class IOF {
             return;
         this.peer.connected = false;
         this.stopHeartbeat();
+        this.stopSessionKeyRotation();
         this.fire('disconnect', { reason: 'CONNECTION_LOST' });
         this.options.autoReconnect
             && this.reconnectAttempts < this.maxReconnectAttempts
@@ -345,7 +672,47 @@ class IOF {
                     || typeof data !== 'object'
                     || !data.hasOwnProperty('_event'))
                     return;
-                const { _event, payload, cid, timestamp } = data;
+                const { v, _event, payload, cid, timestamp, sessionId } = data;
+                // Protocol version check
+                const messageVersion = v || 1;
+                if (messageVersion > PROTOCOL_VERSION) {
+                    this.fire('error', {
+                        type: 'UNSUPPORTED_VERSION',
+                        received: messageVersion,
+                        supported: PROTOCOL_VERSION
+                    });
+                    return;
+                }
+                // Store peer protocol version
+                if (!this.peer.protocolVersion || this.peer.protocolVersion < messageVersion) {
+                    this.peer.protocolVersion = messageVersion;
+                }
+                /**
+                 * Session key control events.
+                 *
+                 * These are answered before authentication — they are what establishes
+                 * the key authentication will use — so they are gated on the feature
+                 * actually being switched on. Without that, a peer that never enabled
+                 * session keys would still derive and rotate them on request, and a
+                 * malformed payload would throw out of the handler.
+                 */
+                if (RESERVED_SESSION_KEY_EVENTS.includes(_event)) {
+                    if (!this.cryptoCfg()?.enableSessionKeys) {
+                        this.fire('error', { type: 'SESSION_KEYS_DISABLED', event: _event, origin });
+                        return;
+                    }
+                    if (!payload || typeof payload !== 'object') {
+                        this.fire('error', { type: 'MALFORMED_SESSION_KEY_EVENT', event: _event, origin });
+                        return;
+                    }
+                    if (_event === '__session_key_init')
+                        this.handleSessionKeyInit(payload.sessionId);
+                    else if (_event === '__session_key_ack')
+                        this.handleSessionKeyAck(payload);
+                    else
+                        this.handleSessionKeyRotate(payload);
+                    return;
+                }
                 // Handle heartbeat responses
                 if (_event === '__heartbeat_response') {
                     this.peer.lastHeartbeat = Date.now();
@@ -357,7 +724,7 @@ class IOF {
                     this.peer.lastHeartbeat = Date.now();
                     return;
                 }
-                this.debug(`[${this.peer.type}] Message: ${_event}`, payload || '');
+                this.debug(`[${this.peer.type}] Message v${messageVersion}: ${_event}`, payload || '');
                 // Handshake or availability check events
                 if (_event == 'pong') {
                     // Content Window is connected to iframe
@@ -366,6 +733,8 @@ class IOF {
                     this.peer.lastHeartbeat = Date.now();
                     this.startHeartbeat();
                     this.fire('connect');
+                    // Initiate session key exchange if enabled
+                    this.initiateSessionKeyExchange();
                     this.processMessageQueue();
                     this.debug(`[${this.peer.type}] connected`);
                     return;
@@ -378,57 +747,15 @@ class IOF {
                             this.fire('error', { type: 'AUTH_FAILED', origin, event: _event });
                             return;
                         }
-                        // Optional application-level incoming validation (non-reserved events only)
-                        if (!RESERVED_EVENTS.includes(_event)) {
-                            if (this.options.allowedIncomingEvents
-                                && !this.options.allowedIncomingEvents.includes(_event)) {
-                                this.fire('error', {
-                                    type: 'DISALLOWED_EVENT',
-                                    direction: 'incoming',
-                                    event: _event,
-                                    origin
-                                });
-                                return;
-                            }
-                            if (this.options.validateIncoming
-                                && !this.options.validateIncoming(_event, payload, origin)) {
-                                this.fire('error', {
-                                    type: 'INVALID_MESSAGE',
-                                    direction: 'incoming',
-                                    event: _event,
-                                    origin
-                                });
-                                return;
-                            }
-                        }
+                        if (!this.acceptIncoming(_event, payload, origin))
+                            return;
                         this.fire(_event, payload, cid);
                     })
                         .catch(error => this.fire('error', { type: 'AUTH_ERROR', origin, event: _event, error: String(error) }));
                     return;
                 }
-                // Optional application-level incoming validation (non-reserved events only)
-                if (!RESERVED_EVENTS.includes(_event)) {
-                    if (this.options.allowedIncomingEvents
-                        && !this.options.allowedIncomingEvents.includes(_event)) {
-                        this.fire('error', {
-                            type: 'DISALLOWED_EVENT',
-                            direction: 'incoming',
-                            event: _event,
-                            origin
-                        });
-                        return;
-                    }
-                    if (this.options.validateIncoming
-                        && !this.options.validateIncoming(_event, payload, origin)) {
-                        this.fire('error', {
-                            type: 'INVALID_MESSAGE',
-                            direction: 'incoming',
-                            event: _event,
-                            origin
-                        });
-                        return;
-                    }
-                }
+                if (!this.acceptIncoming(_event, payload, origin))
+                    return;
                 // Fire available event listeners
                 this.fire(_event, payload, cid);
             }
@@ -486,7 +813,47 @@ class IOF {
                     });
                     return;
                 }
-                const { _event, payload, cid, timestamp } = data;
+                const { v, _event, payload, cid, timestamp } = data;
+                // Protocol version check
+                const messageVersion = v || 1;
+                if (messageVersion > PROTOCOL_VERSION) {
+                    this.fire('error', {
+                        type: 'UNSUPPORTED_VERSION',
+                        received: messageVersion,
+                        supported: PROTOCOL_VERSION
+                    });
+                    return;
+                }
+                // Store peer protocol version
+                if (!this.peer.protocolVersion || this.peer.protocolVersion < messageVersion) {
+                    this.peer.protocolVersion = messageVersion;
+                }
+                /**
+                 * Session key control events.
+                 *
+                 * These are answered before authentication — they are what establishes
+                 * the key authentication will use — so they are gated on the feature
+                 * actually being switched on. Without that, a peer that never enabled
+                 * session keys would still derive and rotate them on request, and a
+                 * malformed payload would throw out of the handler.
+                 */
+                if (RESERVED_SESSION_KEY_EVENTS.includes(_event)) {
+                    if (!this.cryptoCfg()?.enableSessionKeys) {
+                        this.fire('error', { type: 'SESSION_KEYS_DISABLED', event: _event, origin });
+                        return;
+                    }
+                    if (!payload || typeof payload !== 'object') {
+                        this.fire('error', { type: 'MALFORMED_SESSION_KEY_EVENT', event: _event, origin });
+                        return;
+                    }
+                    if (_event === '__session_key_init')
+                        this.handleSessionKeyInit(payload.sessionId);
+                    else if (_event === '__session_key_ack')
+                        this.handleSessionKeyAck(payload);
+                    else
+                        this.handleSessionKeyRotate(payload);
+                    return;
+                }
                 // Handle heartbeat responses
                 if (_event === '__heartbeat_response') {
                     this.peer.lastHeartbeat = Date.now();
@@ -498,7 +865,7 @@ class IOF {
                     this.peer.lastHeartbeat = Date.now();
                     return;
                 }
-                this.debug(`[${this.peer.type}] Message: ${_event}`, payload || '');
+                this.debug(`[${this.peer.type}] Message v${messageVersion}: ${_event}`, payload || '');
                 // Handshake or availability check events
                 if (_event == 'ping') {
                     this.emit('pong');
@@ -508,6 +875,8 @@ class IOF {
                     this.peer.lastHeartbeat = Date.now();
                     this.startHeartbeat();
                     this.fire('connect');
+                    // Initiate session key exchange if enabled
+                    this.initiateSessionKeyExchange();
                     this.processMessageQueue();
                     this.debug(`[${this.peer.type}] connected`);
                     return;
@@ -520,34 +889,15 @@ class IOF {
                             this.fire('error', { type: 'AUTH_FAILED', origin, event: _event });
                             return;
                         }
-                        // Optional application-level incoming validation (non-reserved events only)
-                        if (!RESERVED_EVENTS.includes(_event)) {
-                            if (this.options.allowedIncomingEvents
-                                && !this.options.allowedIncomingEvents.includes(_event)) {
-                                this.fire('error', {
-                                    type: 'DISALLOWED_EVENT',
-                                    direction: 'incoming',
-                                    event: _event,
-                                    origin
-                                });
-                                return;
-                            }
-                            if (this.options.validateIncoming
-                                && !this.options.validateIncoming(_event, payload, origin)) {
-                                this.fire('error', {
-                                    type: 'INVALID_MESSAGE',
-                                    direction: 'incoming',
-                                    event: _event,
-                                    origin
-                                });
-                                return;
-                            }
-                        }
+                        if (!this.acceptIncoming(_event, payload, origin))
+                            return;
                         this.fire(_event, payload, cid);
                     })
                         .catch(error => this.fire('error', { type: 'AUTH_ERROR', origin, event: _event, error: String(error) }));
                     return;
                 }
+                if (!this.acceptIncoming(_event, payload, origin))
+                    return;
                 // Fire available event listeners
                 this.fire(_event, payload, cid);
             }
@@ -633,6 +983,7 @@ class IOF {
                 this.once(`${_event}--${cid}--@ack`, ({ error, args }) => ackFunction(error, ...args));
             }
             const messageData = {
+                v: PROTOCOL_VERSION,
                 _event,
                 payload: sanitizedPayload,
                 cid,
@@ -690,6 +1041,7 @@ class IOF {
                 this.once(`${_event}--${cid}--@ack`, ({ error, args }) => ackFunction(error, ...args));
             }
             const unsigned = {
+                v: PROTOCOL_VERSION,
                 _event,
                 payload: sanitizedPayload,
                 cid,
@@ -813,6 +1165,7 @@ class IOF {
             this.messageListener = undefined;
         }
         this.stopHeartbeat();
+        this.stopSessionKeyRotation();
         if (this.reconnectTimer) {
             clearTimeout(this.reconnectTimer);
             this.reconnectTimer = undefined;
@@ -825,9 +1178,16 @@ class IOF {
         this.peer.source = undefined;
         this.peer.origin = undefined;
         this.peer.lastHeartbeat = undefined;
+        this.peer.protocolVersion = undefined;
+        this.peer.sessionId = undefined;
         this.messageQueue = [];
         this.messageRateTracker = [];
         this.reconnectAttempts = 0;
+        // Clear session keys
+        this.currentSessionKey = undefined;
+        this.pendingSessionKey = undefined;
+        this.previousSessionKey = undefined;
+        this.mySessionId = undefined;
         this.removeListeners();
         typeof fn == 'function' && fn();
         this.debug(`[${this.peer.type}] Disconnected`);
@@ -843,7 +1203,11 @@ class IOF {
             queuedMessages: this.messageQueue.length,
             reconnectAttempts: this.reconnectAttempts,
             activeListeners: Object.keys(this.Events).length,
-            messageRate: this.messageRateTracker.length
+            messageRate: this.messageRateTracker.length,
+            protocolVersion: PROTOCOL_VERSION,
+            peerProtocolVersion: this.peer.protocolVersion,
+            sessionKeyActive: !!this.currentSessionKey,
+            sessionKeyId: this.currentSessionKey?.keyId
         };
     }
     // Clear message queue manually

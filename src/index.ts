@@ -220,55 +220,34 @@ async function hmacSha256Base64Url( secret: string, message: string ): Promise<s
  * - info: context string
  */
 async function deriveSessionKey( masterSecret: string, sessionId1: string, sessionId2: string, keyId: string ): Promise<string> {
-  try {
-    const globalCrypto = getGlobalCrypto() as any
-    const subtle = globalCrypto?.subtle
-    
-    if( subtle && typeof subtle.importKey === 'function' && typeof subtle.deriveBits === 'function' ){
-      const enc = new TextEncoder()
-      
-      // Import master secret
-      const masterKey = await subtle.importKey(
-        'raw',
-        enc.encode( masterSecret ),
-        { name: 'HMAC', hash: 'SHA-256' },
-        false,
-        ['sign']
-      )
-      
-      // Create salt from session IDs
-      const salt = sessionId1 + '|' + sessionId2
-      
-      // PRK = HMAC(salt, masterSecret)
-      const prk = await subtle.sign( 'HMAC', masterKey, enc.encode( salt ) )
-      
-      // Import PRK as key
-      const prkKey = await subtle.importKey(
-        'raw',
-        prk,
-        { name: 'HMAC', hash: 'SHA-256' },
-        false,
-        ['sign']
-      )
-      
-      // OKM = HMAC(PRK, info | 0x01)
-      const info = 'iframe.io-session-key-' + keyId + '\x01'
-      const okm = await subtle.sign( 'HMAC', prkKey, enc.encode( info ) )
-      
-      // Convert to base64url
-      const bytes = new Uint8Array( okm )
-      const b64 = btoa( String.fromCharCode( ...bytes ) )
-      return b64.replace(/\+/g, '-').replace(/\//g, '_').replace(/=+$/g, '')
-    }
-  }
-  catch( error ){
-    // Fallback for Node.js or if WebCrypto fails
-  }
+  /**
+   * Two HMAC steps, both through `hmacSha256Base64Url`, deliberately.
+   *
+   * This used to have a WebCrypto branch alongside this one, and the two did
+   * not agree: the WebCrypto path fed the extract step's RAW bytes into the
+   * expand step and appended \x01 to the info string, while this path fed the
+   * base64url TEXT of those bytes and appended nothing. Same inputs, different
+   * keys.
+   *
+   * Peers do not have to share an implementation for that to matter, only an
+   * environment: `crypto.subtle` is undefined outside a secure context, so a
+   * WebView or iframe served over plain HTTP took one branch while an HTTPS
+   * host took the other. Every signed message then failed to verify — and
+   * because the WebCrypto branch was also entered from a silent catch, a
+   * single transient failure on one side desynchronised the pair for the rest
+   * of the connection.
+   *
+   * `hmacSha256Base64Url` already resolves WebCrypto vs Node internally and
+   * returns the same string either way, so deriving through it twice is both
+   * shorter and the only version that can agree with itself.
+   */
+  const
+  salt = sessionId1 + '|' + sessionId2,
+  // Extract: PRK = HMAC( masterSecret, salt )
+  prk = await hmacSha256Base64Url( masterSecret, salt ),
+  // Expand: OKM = HMAC( PRK, info )
+  info = 'iframe.io-session-key-' + keyId
 
-  // Simple HMAC-based KDF fallback
-  const salt = sessionId1 + '|' + sessionId2
-  const prk = await hmacSha256Base64Url( masterSecret, salt )
-  const info = 'iframe.io-session-key-' + keyId
   return await hmacSha256Base64Url( prk, info )
 }
 
@@ -297,6 +276,14 @@ const ackId = () => {
 
   return `${timestampFallback}_${randomFallback}`
 }
+
+// Answered before authentication, so they are gated separately — see the
+// handlers in initiate() and listen().
+const RESERVED_SESSION_KEY_EVENTS = [
+  '__session_key_init',
+  '__session_key_rotate',
+  '__session_key_ack'
+]
 
 const RESERVED_EVENTS = [
   'ping',
@@ -361,15 +348,41 @@ export default class IOF {
     }
   }
 
+  /**
+   * Forget nonces that can no longer be replayed, and only then cap the map.
+   *
+   * Age is what actually decides replayability: a captured message is refused
+   * once its `ts` falls outside maxSkewMs, so a nonce is only worth keeping
+   * that long. Pruning purely by count — as this did — made the two defaults
+   * contradict each other: 500 remembered nonces at the default 100 messages a
+   * second is five seconds of history guarding a two-minute acceptance window,
+   * so anything captured could simply be replayed after five seconds.
+   *
+   * The count cap stays as a memory bound. Reaching it means the rate limiter
+   * is admitting more traffic than the window can remember, so it is reported
+   * rather than applied in silence.
+   */
   private pruneNonces( maxSize: number ){
+    const cutoff = Date.now() - ( this.cryptoCfg()?.maxSkewMs ?? 2 * 60 * 1000 )
+
+    for( const [ nonce, ts ] of this.seenNonces )
+      if( ts < cutoff ) this.seenNonces.delete( nonce )
+
     if( this.seenNonces.size <= maxSize ) return
-    // Remove oldest inserted entries
+
+    this.fire('error', {
+      type: 'REPLAY_WINDOW_EXCEEDED',
+      remembered: this.seenNonces.size,
+      maxSize
+    })
+
+    // Oldest first — Map iterates in insertion order, and nonces are inserted
+    // as they arrive.
     const toRemove = this.seenNonces.size - maxSize
     let i = 0
     for( const key of this.seenNonces.keys() ){
       this.seenNonces.delete( key )
-      i++
-      if( i >= toRemove ) break
+      if( ++i >= toRemove ) break
     }
   }
 
@@ -436,6 +449,48 @@ export default class IOF {
     secrets.push({ secret: cfg.secret })
 
     return secrets
+  }
+
+  /**
+   * Application-level admission check for one incoming message.
+   *
+   * Reserved events bypass it deliberately: the handshake and the heartbeats
+   * must survive an allow-list that does not name them, or configuring one
+   * would silently sever the connection.
+   *
+   * This lives in a method because it used to be written out at each place a
+   * message can arrive — the authenticated and unauthenticated branches of
+   * `initiate()` and of `listen()` — and `listen()`'s unauthenticated branch
+   * never got a copy. An embedded bridge configured with an allow-list and no
+   * cryptoAuth, which is exactly how de.eui runs it, therefore accepted every
+   * event name a host cared to send.
+   */
+  private acceptIncoming( _event: string, payload: any, origin: string ): boolean {
+    if( RESERVED_EVENTS.includes( _event ) ) return true
+
+    if( this.options.allowedIncomingEvents
+        && !this.options.allowedIncomingEvents.includes( _event ) ){
+      this.fire('error', {
+        type: 'DISALLOWED_EVENT',
+        direction: 'incoming',
+        event: _event,
+        origin
+      })
+      return false
+    }
+
+    if( this.options.validateIncoming
+        && !this.options.validateIncoming( _event, payload, origin ) ){
+      this.fire('error', {
+        type: 'INVALID_MESSAGE',
+        direction: 'incoming',
+        event: _event,
+        origin
+      })
+      return false
+    }
+
+    return true
   }
 
   /**
@@ -648,10 +703,10 @@ export default class IOF {
     const now = Date.now()
     if( Math.abs( now - ts ) > cfg.maxSkewMs ) return false
 
-    // Replay protection
+    // Replay protection. The nonce is only recorded once the signature has been
+    // checked, further down: burning it here let an unsigned or badly signed
+    // message consume the nonce of a legitimate one still in flight.
     if( this.seenNonces.has( nonce ) ) return false
-    this.seenNonces.set( nonce, ts )
-    this.pruneNonces( cfg.replayWindowSize )
 
     const canonical = JSON.stringify({
       v: data.v,
@@ -674,6 +729,9 @@ export default class IOF {
       try {
         const expected = await hmacSha256Base64Url( secret, canonical )
         if( constantTimeEqual( expected, sig ) ){
+          this.seenNonces.set( nonce, ts )
+          this.pruneNonces( cfg.replayWindowSize )
+
           this.debug(`[${this.peer.type}] Auth verified${keyId ? ` with key: ${keyId}` : ''}`)
           return true
         }
@@ -877,19 +935,30 @@ export default class IOF {
           this.peer.protocolVersion = messageVersion
         }
 
-        // Handle session key events
-        if( _event === '__session_key_init' ){
-          this.handleSessionKeyInit( payload.sessionId )
-          return
-        }
+        /**
+         * Session key control events.
+         *
+         * These are answered before authentication — they are what establishes
+         * the key authentication will use — so they are gated on the feature
+         * actually being switched on. Without that, a peer that never enabled
+         * session keys would still derive and rotate them on request, and a
+         * malformed payload would throw out of the handler.
+         */
+        if( RESERVED_SESSION_KEY_EVENTS.includes( _event ) ){
+          if( !this.cryptoCfg()?.enableSessionKeys ){
+            this.fire('error', { type: 'SESSION_KEYS_DISABLED', event: _event, origin })
+            return
+          }
 
-        if( _event === '__session_key_ack' ){
-          this.handleSessionKeyAck( payload )
-          return
-        }
+          if( !payload || typeof payload !== 'object' ){
+            this.fire('error', { type: 'MALFORMED_SESSION_KEY_EVENT', event: _event, origin })
+            return
+          }
 
-        if( _event === '__session_key_rotate' ){
-          this.handleSessionKeyRotate( payload )
+          if( _event === '__session_key_init' ) this.handleSessionKeyInit( payload.sessionId )
+          else if( _event === '__session_key_ack' ) this.handleSessionKeyAck( payload )
+          else this.handleSessionKeyRotate( payload )
+
           return
         }
 
@@ -936,30 +1005,7 @@ export default class IOF {
                 return
               }
 
-              // Optional application-level incoming validation (non-reserved events only)
-              if( !RESERVED_EVENTS.includes( _event ) ){
-                if( this.options.allowedIncomingEvents
-                    && !this.options.allowedIncomingEvents.includes( _event ) ){
-                  this.fire('error', {
-                    type: 'DISALLOWED_EVENT',
-                    direction: 'incoming',
-                    event: _event,
-                    origin
-                  })
-                  return
-                }
-
-                if( this.options.validateIncoming
-                    && !this.options.validateIncoming( _event, payload, origin ) ){
-                  this.fire('error', {
-                    type: 'INVALID_MESSAGE',
-                    direction: 'incoming',
-                    event: _event,
-                    origin
-                  })
-                  return
-                }
-              }
+              if( !this.acceptIncoming( _event, payload, origin ) ) return
 
               this.fire( _event, payload, cid )
             })
@@ -967,30 +1013,7 @@ export default class IOF {
           return
         }
 
-        // Optional application-level incoming validation (non-reserved events only)
-        if( !RESERVED_EVENTS.includes( _event ) ){
-          if( this.options.allowedIncomingEvents
-              && !this.options.allowedIncomingEvents.includes( _event ) ){
-            this.fire('error', {
-              type: 'DISALLOWED_EVENT',
-              direction: 'incoming',
-              event: _event,
-              origin
-            })
-            return
-          }
-
-          if( this.options.validateIncoming
-              && !this.options.validateIncoming( _event, payload, origin ) ){
-            this.fire('error', {
-              type: 'INVALID_MESSAGE',
-              direction: 'incoming',
-              event: _event,
-              origin
-            })
-            return
-          }
-        }
+        if( !this.acceptIncoming( _event, payload, origin ) ) return
 
         // Fire available event listeners
         this.fire( _event, payload, cid )
@@ -1077,19 +1100,30 @@ export default class IOF {
           this.peer.protocolVersion = messageVersion
         }
 
-        // Handle session key events
-        if( _event === '__session_key_init' ){
-          this.handleSessionKeyInit( payload.sessionId )
-          return
-        }
+        /**
+         * Session key control events.
+         *
+         * These are answered before authentication — they are what establishes
+         * the key authentication will use — so they are gated on the feature
+         * actually being switched on. Without that, a peer that never enabled
+         * session keys would still derive and rotate them on request, and a
+         * malformed payload would throw out of the handler.
+         */
+        if( RESERVED_SESSION_KEY_EVENTS.includes( _event ) ){
+          if( !this.cryptoCfg()?.enableSessionKeys ){
+            this.fire('error', { type: 'SESSION_KEYS_DISABLED', event: _event, origin })
+            return
+          }
 
-        if( _event === '__session_key_ack' ){
-          this.handleSessionKeyAck( payload )
-          return
-        }
+          if( !payload || typeof payload !== 'object' ){
+            this.fire('error', { type: 'MALFORMED_SESSION_KEY_EVENT', event: _event, origin })
+            return
+          }
 
-        if( _event === '__session_key_rotate' ){
-          this.handleSessionKeyRotate( payload )
+          if( _event === '__session_key_init' ) this.handleSessionKeyInit( payload.sessionId )
+          else if( _event === '__session_key_ack' ) this.handleSessionKeyAck( payload )
+          else this.handleSessionKeyRotate( payload )
+
           return
         }
 
@@ -1137,36 +1171,15 @@ export default class IOF {
                 return
               }
 
-              // Optional application-level incoming validation (non-reserved events only)
-              if( !RESERVED_EVENTS.includes( _event ) ){
-                if( this.options.allowedIncomingEvents
-                    && !this.options.allowedIncomingEvents.includes( _event ) ){
-                  this.fire('error', {
-                    type: 'DISALLOWED_EVENT',
-                    direction: 'incoming',
-                    event: _event,
-                    origin
-                  })
-                  return
-                }
-
-                if( this.options.validateIncoming
-                    && !this.options.validateIncoming( _event, payload, origin ) ){
-                  this.fire('error', {
-                    type: 'INVALID_MESSAGE',
-                    direction: 'incoming',
-                    event: _event,
-                    origin
-                  })
-                  return
-                }
-              }
+              if( !this.acceptIncoming( _event, payload, origin ) ) return
 
               this.fire( _event, payload, cid )
             })
             .catch( error => this.fire('error', { type: 'AUTH_ERROR', origin, event: _event, error: String(error) }) )
           return
         }
+
+        if( !this.acceptIncoming( _event, payload, origin ) ) return
 
         // Fire available event listeners
         this.fire( _event, payload, cid )

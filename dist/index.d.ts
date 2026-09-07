@@ -24,6 +24,26 @@ export type CryptoAuthOptions = {
      * Default: 500
      */
     replayWindowSize?: number;
+    /**
+     * Enable session-derived keys for enhanced security.
+     * When enabled, a unique session key is derived from the master secret
+     * and exchanged session IDs during connection handshake.
+     * Recommended for long-lived connections and high-security applications.
+     * Default: false
+     */
+    enableSessionKeys?: boolean;
+    /**
+     * How often to rotate session keys (in milliseconds).
+     * Only applies when enableSessionKeys is true.
+     * Default: 3600000 (1 hour)
+     */
+    sessionKeyRotationInterval?: number;
+};
+export type SessionKeyInfo = {
+    keyId: string;
+    key: string;
+    createdAt: number;
+    expiresAt: number;
 };
 export type Options = {
     type?: PeerType;
@@ -59,8 +79,11 @@ export type Peer = {
     origin?: string;
     connected?: boolean;
     lastHeartbeat?: number;
+    protocolVersion?: number;
+    sessionId?: string;
 };
 export type MessageData = {
+    v: number;
     _event: string;
     payload: any;
     cid: string | undefined;
@@ -71,7 +94,9 @@ export type MessageData = {
         ts: number;
         nonce: string;
         sig: string;
+        keyId?: string;
     };
+    sessionId?: string;
 };
 export type Message = {
     origin: string;
@@ -91,14 +116,91 @@ export default class IOF {
     private messageListener?;
     private heartbeatTimer?;
     private reconnectTimer?;
+    private sessionKeyRotationTimer?;
     private messageQueue;
     private messageRateTracker;
     private reconnectAttempts;
     private maxReconnectAttempts;
     private seenNonces;
+    private currentSessionKey?;
+    private pendingSessionKey?;
+    private previousSessionKey?;
+    private mySessionId?;
     constructor(options?: Options);
     private cryptoCfg;
+    /**
+     * Forget nonces that can no longer be replayed, and only then cap the map.
+     *
+     * Age is what actually decides replayability: a captured message is refused
+     * once its `ts` falls outside maxSkewMs, so a nonce is only worth keeping
+     * that long. Pruning purely by count — as this did — made the two defaults
+     * contradict each other: 500 remembered nonces at the default 100 messages a
+     * second is five seconds of history guarding a two-minute acceptance window,
+     * so anything captured could simply be replayed after five seconds.
+     *
+     * The count cap stays as a memory bound. Reaching it means the rate limiter
+     * is admitting more traffic than the window can remember, so it is reported
+     * rather than applied in silence.
+     */
     private pruneNonces;
+    /**
+     * Get the appropriate secret for signing messages
+     * Uses session key if available, otherwise falls back to master secret
+     */
+    private getSigningSecret;
+    /**
+     * Get the appropriate secret for verifying incoming messages
+     * Tries current key, then pending, then previous, then master
+     */
+    private getVerificationSecrets;
+    /**
+     * Application-level admission check for one incoming message.
+     *
+     * Reserved events bypass it deliberately: the handshake and the heartbeats
+     * must survive an allow-list that does not name them, or configuring one
+     * would silently sever the connection.
+     *
+     * This lives in a method because it used to be written out at each place a
+     * message can arrive — the authenticated and unauthenticated branches of
+     * `initiate()` and of `listen()` — and `listen()`'s unauthenticated branch
+     * never got a copy. An embedded bridge configured with an allow-list and no
+     * cryptoAuth, which is exactly how de.eui runs it, therefore accepted every
+     * event name a host cared to send.
+     */
+    private acceptIncoming;
+    /**
+     * Initialize session key exchange
+     * Called after connection is established if enableSessionKeys is true
+     */
+    private initiateSessionKeyExchange;
+    /**
+     * Handle incoming session key initialization
+     */
+    private handleSessionKeyInit;
+    /**
+     * Handle session key acknowledgment
+     */
+    private handleSessionKeyAck;
+    /**
+     * Derive and store a session key
+     */
+    private deriveAndStoreSessionKey;
+    /**
+     * Start session key rotation timer
+     */
+    private startSessionKeyRotation;
+    /**
+     * Rotate session key
+     */
+    private rotateSessionKey;
+    /**
+     * Handle incoming session key rotation
+     */
+    private handleSessionKeyRotate;
+    /**
+     * Stop session key rotation timer
+     */
+    private stopSessionKeyRotation;
     private signOutgoing;
     private verifyIncomingAuth;
     debug(...args: any[]): void;
@@ -145,6 +247,10 @@ export default class IOF {
         reconnectAttempts: number;
         activeListeners: number;
         messageRate: number;
+        protocolVersion: number;
+        peerProtocolVersion: number | undefined;
+        sessionKeyActive: boolean;
+        sessionKeyId: string | undefined;
     };
     clearQueue(): this;
 }
