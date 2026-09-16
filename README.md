@@ -363,7 +363,7 @@ const iframeIO = new IOF({
   maxMessagesPerSecond: 100,         // Rate limit (100 messages/second)
   autoReconnect: true,               // Enable automatic reconnection
   messageQueueSize: 50,              // Max queued messages when disconnected
-  allowedIncomingEvents: ['hello', 'response'], // Optional incoming event allowlist
+  allowedIncomingEvents: ['hello', 'response'], // Optional incoming event allowlist (acknowledgements always pass)
   validateIncoming: (event, payload, origin) => true, // Optional custom validator
   cryptoAuth: {
     secret: 'replace-with-shared-secret',
@@ -634,7 +634,10 @@ const iframeIO = new IOF({
 1. **Always use HTTPS** for production deployments
 2. **Validate origins** strictly in both peers
 3. **Enable session keys** for applications handling sensitive data
-4. **Use allowedIncomingEvents** to limit attack surface
+4. **Use allowedIncomingEvents** to limit attack surface — it covers events the
+   peer pushes at you, never an acknowledgement of a message you sent (those
+   arrive on `<event>--<cid>--@ack` with a per-call cid, so no list could name
+   them, and filtering them would hang every `emitAsync()`)
 5. **Implement custom validation** for critical payloads
 6. **Monitor error events** for security incidents
 7. **Rotate master secrets** periodically (outside of session rotation)

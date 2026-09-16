@@ -468,6 +468,24 @@ export default class IOF {
   private acceptIncoming( _event: string, payload: any, origin: string ): boolean {
     if( RESERVED_EVENTS.includes( _event ) ) return true
 
+    /**
+     * An acknowledgement is a reply to a message this side sent, not an event
+     * the peer decided to push.
+     *
+     * `emit( event, payload, fn )` registers a one-shot listener under
+     * `<event>--<cid>--@ack` and the peer replies on that exact name. No host
+     * can put those names in `allowedIncomingEvents`: the cid is generated
+     * here, per call, and only exists for the lifetime of the round trip. Held
+     * to the filter, every acknowledged emit times out instead -- `emitAsync`
+     * with it -- while the peer sees a completed exchange, which is silent in
+     * both directions and reads as a hung bridge.
+     *
+     * Letting them past grants nothing: the only listener that can receive one
+     * is the one this side registered a moment earlier under a cid the peer had
+     * to be told, and all it does is settle that pending call.
+     */
+    if( _event.endsWith('--@ack') ) return true
+
     if( this.options.allowedIncomingEvents
         && !this.options.allowedIncomingEvents.includes( _event ) ){
       this.fire('error', {
