@@ -1246,6 +1246,11 @@ export default class IOF {
       try { payload !== undefined ? fn( payload, ackFn ) : fn( ackFn ) }
       catch( error ){
         this.debug(`[${this.peer.type}] Listener error for ${_event}:`, error)
+
+        // An `error` listener that throws would be handed its own error, and
+        // throw again, until the stack runs out
+        if( _event === 'error' || _event === 'error--@once' ) return
+
         this.fire('error', {
           type: 'LISTENER_ERROR',
           event: _event,
@@ -1441,7 +1446,8 @@ export default class IOF {
     // Remove all listeners for event
     else delete this.Events[_event]
 
-    typeof fn == 'function' && fn()
+    // `fn` is the listener being removed: calling it here ran it once more,
+    // with no payload, as it was taken off
     this.debug(`[${this.peer.type}] <${_event}> listener off`)
 
     return this
